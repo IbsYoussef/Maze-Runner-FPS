@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "shared",
+    "server",
+    "client",
+]
+resolver = "2"
+
+[workspace.metadata]
+year = "2024"
