@@ -1,0 +1,15 @@
+# Rust build output
+target/
+
+# Dependency lock file (keep Cargo.lock for binaries, ignore for libraries)
+# We keep it since server and client are binary crates
+# Cargo.lock
+
+# IDE and editor files
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
