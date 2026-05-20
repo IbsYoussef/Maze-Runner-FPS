@@ -22,4 +22,4 @@
   - FPS counter
 
 ## Housekeeping
-- [ ] Verify `dev` branch protection rules match `main`
+- [✅] Verify `dev` branch protection rules match `main`
