@@ -1,0 +1,22 @@
+name: Mirror to Gitea
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to Gitea
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          git remote add gitea https://iyoussef:${GITEA_TOKEN}@learn.01founders.co/git/iyoussef/Multiplayer-FPS.git
+          git push gitea HEAD:${GITHUB_REF#refs/heads/} --force
