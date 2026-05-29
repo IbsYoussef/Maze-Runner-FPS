@@ -20,5 +20,5 @@ jobs:
         run: |
           git remote add gitea https://iyoussef:${GITEA_TOKEN}@learn.01founders.co/git/iyoussef/Multiplayer-FPS.git
           git fetch --prune origin
-          git push gitea HEAD:${GITHUB_REF#refs/heads/} --force
+          git push gitea HEAD:${GITHUB_REF#refs/heads/}
           git push gitea --prune
