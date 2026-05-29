@@ -88,7 +88,7 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
             continue;
         }
 
-        let packet: InputPacket = match bincode::deserialize(&buf[..len]) {
+        let packet: InputPacket = match postcard::from_bytes(&buf[..len]) {
             Ok(p) => p,
             Err(_) => {
                 tracing::warn!("malformed packet from {src}, dropping");
@@ -208,7 +208,7 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
                 .collect(),
         };
 
-        let encoded = match bincode::serialize(&state) {
+        let encoded = match postcard::to_allocvec(&state) {
             Ok(b) => b,
             Err(e) => {
                 tracing::error!("serialize error: {e}");
