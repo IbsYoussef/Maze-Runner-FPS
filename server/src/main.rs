@@ -13,13 +13,23 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time;
 
-use shared::protocol::{InputPacket, PlayerState, StatePacket, MAX_PACKET_BYTES};
+use shared::protocol::{InputPacket, MAX_PACKET_BYTES, PlayerState, StatePacket};
+
+use clap::Parser;
 
 const TICK_MS: u64 = 16;
 const PLAYER_SPEED: f32 = 0.05;
 const PLAYER_TURN_SPEED: f32 = 0.04;
 const TIMEOUT_SECS: u64 = 10;
 const RATE_LIMIT_PER_SEC: u32 = 128;
+
+#[derive(Parser, Debug)]
+#[command(name = "maze-wars-server")]
+struct Args {
+    // Port to listen on
+    #[arg(short, long, default_value_t = 34254)]
+    port: u16,
+}
 
 #[derive(Debug)]
 struct Player {
@@ -40,8 +50,13 @@ type Players = Arc<Mutex<HashMap<SocketAddr, Player>>>;
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let addr = "0.0.0.0:34254";
-    let socket = Arc::new(UdpSocket::bind(addr).await.expect("failed to bind UDP socket"));
+    let args = Args::parse();
+    let addr = format!("0.0.0.0:{}", args.port);
+    let socket = Arc::new(
+        UdpSocket::bind(&addr)
+            .await
+            .expect("failed to bind UDP socket"),
+    );
     tracing::info!("server listening on {}", addr);
 
     let players: Players = Arc::new(Mutex::new(HashMap::new()));
@@ -62,7 +77,10 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
     loop {
         let (len, src) = match socket.recv_from(&mut buf).await {
             Ok(v) => v,
-            Err(e) => { tracing::warn!("recv error: {e}"); continue; }
+            Err(e) => {
+                tracing::warn!("recv error: {e}");
+                continue;
+            }
         };
 
         if len > MAX_PACKET_BYTES {
@@ -72,7 +90,10 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
 
         let packet: InputPacket = match bincode::deserialize(&buf[..len]) {
             Ok(p) => p,
-            Err(_) => { tracing::warn!("malformed packet from {src}, dropping"); continue; }
+            Err(_) => {
+                tracing::warn!("malformed packet from {src}, dropping");
+                continue;
+            }
         };
 
         let mut players = players.lock().await;
@@ -82,17 +103,20 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
             // random session token using address hash + time as entropy source
             let token = src.port() as u64 ^ next_id as u64 ^ 0xdeadbeefcafe;
             tracing::info!("new player {} from {}", next_id, src);
-            players.insert(src, Player {
-                id: next_id,
-                x: 1.5,
-                y: 1.5,
-                angle: 0.0,
-                session_token: token,
-                last_sequence: 0,
-                last_seen: Instant::now(),
-                packet_count: 0,
-                rate_window_start: Instant::now(),
-            });
+            players.insert(
+                src,
+                Player {
+                    id: next_id,
+                    x: 1.5,
+                    y: 1.5,
+                    angle: 0.0,
+                    session_token: token,
+                    last_sequence: 0,
+                    last_seen: Instant::now(),
+                    packet_count: 0,
+                    rate_window_start: Instant::now(),
+                },
+            );
             next_id += 1;
         }
 
@@ -132,8 +156,12 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
             player.x -= player.angle.cos() * PLAYER_SPEED;
             player.y -= player.angle.sin() * PLAYER_SPEED;
         }
-        if packet.turn_left  { player.angle -= PLAYER_TURN_SPEED; }
-        if packet.turn_right { player.angle += PLAYER_TURN_SPEED; }
+        if packet.turn_left {
+            player.angle -= PLAYER_TURN_SPEED;
+        }
+        if packet.turn_right {
+            player.angle += PLAYER_TURN_SPEED;
+        }
     }
 }
 
@@ -145,7 +173,9 @@ async fn game_tick(players: Players) {
         let mut players = players.lock().await;
         players.retain(|addr, p| {
             let alive = p.last_seen.elapsed().as_secs() < TIMEOUT_SECS;
-            if !alive { tracing::info!("player {} ({}) timed out", p.id, addr); }
+            if !alive {
+                tracing::info!("player {} ({}) timed out", p.id, addr);
+            }
             alive
         });
     }
@@ -161,21 +191,29 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
         sequence = sequence.wrapping_add(1);
 
         let players = players.lock().await;
-        if players.is_empty() { continue; }
+        if players.is_empty() {
+            continue;
+        }
 
         let state = StatePacket {
             sequence,
-            players: players.values().map(|p| PlayerState {
-                id: p.id,
-                x: p.x,
-                y: p.y,
-                angle: p.angle,
-            }).collect(),
+            players: players
+                .values()
+                .map(|p| PlayerState {
+                    id: p.id,
+                    x: p.x,
+                    y: p.y,
+                    angle: p.angle,
+                })
+                .collect(),
         };
 
         let encoded = match bincode::serialize(&state) {
             Ok(b) => b,
-            Err(e) => { tracing::error!("serialize error: {e}"); continue; }
+            Err(e) => {
+                tracing::error!("serialize error: {e}");
+                continue;
+            }
         };
 
         for addr in players.keys() {
