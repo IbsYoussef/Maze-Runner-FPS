@@ -3,8 +3,8 @@ name: Mirror to Gitea
 on:
   push:
     branches:
-      - main
-      - dev
+      - '**'
+  delete:
 
 jobs:
   mirror:
@@ -19,4 +19,6 @@ jobs:
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
         run: |
           git remote add gitea https://iyoussef:${GITEA_TOKEN}@learn.01founders.co/git/iyoussef/Multiplayer-FPS.git
+          git fetch --prune origin
           git push gitea HEAD:${GITHUB_REF#refs/heads/} --force
+          git push gitea --prune
