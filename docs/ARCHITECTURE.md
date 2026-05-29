@@ -142,7 +142,7 @@ Three levels ship with the game, defined as constants in `shared`. Level difficu
 
 ## 7. Work split
 
-|                  | iyoussef                                               | teammate                                                           |
+|                  | IbsYoussef                                             | Pinkish-Warrior                                                    |
 | ---------------- | ------------------------------------------------------ | ------------------------------------------------------------------ |
 | Primary crate    | `server/`                                              | `client/`                                                          |
 | Shared ownership | `shared/` — agreed together first                      | `shared/` — agreed together first                                  |
