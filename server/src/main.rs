@@ -13,6 +13,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time;
 
+use shared::map::get_level;
 use shared::protocol::{InputPacket, MAX_PACKET_BYTES, PlayerState, StatePacket};
 
 use clap::Parser;
@@ -26,9 +27,13 @@ const RATE_LIMIT_PER_SEC: u32 = 128;
 #[derive(Parser, Debug)]
 #[command(name = "maze-wars-server")]
 struct Args {
-    // Port to listen on
+    /// Port to listen on
     #[arg(short, long, default_value_t = 34254)]
     port: u16,
+
+    /// Level to load (1, 2, or 3)
+    #[arg(short, long, default_value_t = 1)]
+    level: u8,
 }
 
 #[derive(Debug)]
@@ -42,6 +47,12 @@ struct Player {
     last_seen: Instant,
     packet_count: u32,
     rate_window_start: Instant,
+
+    // input flags -- set by listener, consumed by game tick
+    input_forward: bool,
+    input_backward: bool,
+    input_turn_left: bool,
+    input_turn_right: bool,
 }
 
 type Players = Arc<Mutex<HashMap<SocketAddr, Player>>>;
@@ -59,17 +70,20 @@ async fn main() {
     );
     tracing::info!("server listening on {}", addr);
 
+    let map = Arc::new(get_level(args.level));
+    tracing::info!("loaded level {}", args.level);
+
     let players: Players = Arc::new(Mutex::new(HashMap::new()));
 
     // spawn the three tasks
     let listener_handle = tokio::spawn(udp_listener(Arc::clone(&socket), Arc::clone(&players)));
-    let tick_handle = tokio::spawn(game_tick(Arc::clone(&players)));
+    let tick_handle = tokio::spawn(game_tick(Arc::clone(&players), Arc::clone(&map)));
     let broadcast_handle = tokio::spawn(broadcast(Arc::clone(&socket), Arc::clone(&players)));
 
     let _ = tokio::try_join!(listener_handle, tick_handle, broadcast_handle);
 }
 
-// UDP listener task — receives InputPackets, registers new players, queues inputs
+// UDP listener task — receives InputPackets, registers new players, stores input flags
 async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
     let mut buf = vec![0u8; MAX_PACKET_BYTES];
     let mut next_id: u32 = 1;
@@ -115,6 +129,10 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
                     last_seen: Instant::now(),
                     packet_count: 0,
                     rate_window_start: Instant::now(),
+                    input_forward: false,
+                    input_backward: false,
+                    input_turn_left: false,
+                    input_turn_right: false,
                 },
             );
             next_id += 1;
@@ -134,7 +152,7 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
             continue;
         }
 
-        // session token check (skip for the very first packet that registered the player)
+        // session token check
         if packet.session_token != 0 && packet.session_token != player.session_token {
             tracing::warn!("bad session token from {src}, dropping");
             continue;
@@ -147,30 +165,22 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
         player.last_sequence = packet.sequence;
         player.last_seen = now;
 
-        // apply input directly (game tick will use the resulting state)
-        if packet.forward {
-            player.x += player.angle.cos() * PLAYER_SPEED;
-            player.y += player.angle.sin() * PLAYER_SPEED;
-        }
-        if packet.backward {
-            player.x -= player.angle.cos() * PLAYER_SPEED;
-            player.y -= player.angle.sin() * PLAYER_SPEED;
-        }
-        if packet.turn_left {
-            player.angle -= PLAYER_TURN_SPEED;
-        }
-        if packet.turn_right {
-            player.angle += PLAYER_TURN_SPEED;
-        }
+        // store input flags -- game tick will apply movement
+        player.input_forward = packet.forward;
+        player.input_backward = packet.backward;
+        player.input_turn_left = packet.turn_left;
+        player.input_turn_right = packet.turn_right;
     }
 }
 
-// Game tick task — runs every 16ms, drops timed-out players
-async fn game_tick(players: Players) {
+// Game tick task — runs every 16ms, applies movement, checks collisions, drops timeouts
+async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
     let mut interval = time::interval(Duration::from_millis(TICK_MS));
     loop {
         interval.tick().await;
         let mut players = players.lock().await;
+
+        // drop timed-out players
         players.retain(|addr, p| {
             let alive = p.last_seen.elapsed().as_secs() < TIMEOUT_SECS;
             if !alive {
@@ -178,6 +188,33 @@ async fn game_tick(players: Players) {
             }
             alive
         });
+
+        // apply movement and collision detection for each player
+        for player in players.values_mut() {
+            let mut new_x = player.x;
+            let mut new_y = player.y;
+
+            if player.input_forward {
+                new_x += player.angle.cos() * PLAYER_SPEED;
+                new_y += player.angle.sin() * PLAYER_SPEED;
+            }
+            if player.input_backward {
+                new_x -= player.angle.cos() * PLAYER_SPEED;
+                new_y -= player.angle.sin() * PLAYER_SPEED;
+            }
+            if player.input_turn_left {
+                player.angle -= PLAYER_TURN_SPEED;
+            }
+            if player.input_turn_right {
+                player.angle += PLAYER_TURN_SPEED;
+            }
+
+            // only apply new position if it does not land inside a wall
+            if !map.is_wall(new_x as usize, new_y as usize) {
+                player.x = new_x;
+                player.y = new_y;
+            }
+        }
     }
 }
 
