@@ -210,7 +210,9 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
             }
 
             // only apply new position if it does not land inside a wall
-            if !map.is_wall(new_x as usize, new_y as usize) {
+            let nx = new_x as i32;
+            let ny = new_y as i32;
+            if nx >= 0 && ny >= 0 && !map.is_wall(nx as usize, ny as usize) {
                 player.x = new_x;
                 player.y = new_y;
             }
