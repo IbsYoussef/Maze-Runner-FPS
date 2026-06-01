@@ -93,3 +93,11 @@ pub fn level_3() -> Map {
         ],
     }
 }
+
+pub fn get_level(n: u8) -> Map {
+    match n {
+        1 => level_1(),
+        2 => level_2(),
+        _ => level_3(),
+    }
+}
