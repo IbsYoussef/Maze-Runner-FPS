@@ -35,8 +35,8 @@ Tracks all work from setup to submission. Updated as tasks are completed.
 - [x] Rate limiting per client
 - [x] Player timeout and cleanup
 - [x] Sequence number ordering — discard out-of-order packets
-- [ ] Refactor movement out of listener task into game tick task
-- [ ] Collision detection against map using `shared::map::is_wall()`
+- [x] Refactor movement out of listener task into game tick task
+- [x] Collision detection against map using `shared::map::is_wall()`
 - [ ] Support minimum 10 simultaneous connections (verify and test)
 
 ---
@@ -95,4 +95,4 @@ Tracks all work from setup to submission. Updated as tasks are completed.
 
 ---
 
-_Last updated: May 2026_
+_Last updated: June 2026_
