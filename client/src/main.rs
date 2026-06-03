@@ -140,6 +140,10 @@ impl ApplicationHandler for App {
     }
 }
 
+fn lerp(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t) as u8
+}
+
 impl App {
     fn render(&mut self) {
         let pixels = match &mut self.pixels {
@@ -149,20 +153,22 @@ impl App {
 
         let frame = pixels.frame_mut();
 
-        // placeholder sky / floor split — replaced by raycaster on Day 2
-        let midpoint = (HEIGHT / 2) as usize;
+        // placeholder sky / floor gradients — replaced by raycaster on Day 2
+        let mid = (HEIGHT / 2) as usize;
         for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
             let row = i / WIDTH as usize;
-            if row < midpoint {
-                // sky — dark blue
-                pixel[0] = 0x1a;
-                pixel[1] = 0x1a;
-                pixel[2] = 0x4e;
+            if row < mid {
+                // sky: black at top → deep violet at horizon
+                let t = row as f32 / mid as f32;
+                pixel[0] = lerp(0x00, 0x6a, t);
+                pixel[1] = lerp(0x00, 0x00, t);
+                pixel[2] = lerp(0x00, 0xcc, t);
             } else {
-                // floor — dark grey
-                pixel[0] = 0x2a;
-                pixel[1] = 0x2a;
-                pixel[2] = 0x2a;
+                // floor: burnt orange at horizon → near-black at bottom
+                let t = (row - mid) as f32 / mid as f32;
+                pixel[0] = lerp(0xcc, 0x18, t);
+                pixel[1] = lerp(0x55, 0x08, t);
+                pixel[2] = lerp(0x00, 0x00, t);
             }
             pixel[3] = 0xff;
         }
