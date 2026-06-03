@@ -26,7 +26,7 @@ Tracks all work from setup to submission. Updated as tasks are completed.
 
 ---
 
-## Phase 3 — Server 🔄
+## Phase 3 — Server ✅
 
 - [x] UDP socket binding with configurable port via `clap`
 - [x] Tokio async runtime with three tasks (listener, tick, broadcast)
@@ -37,7 +37,7 @@ Tracks all work from setup to submission. Updated as tasks are completed.
 - [x] Sequence number ordering — discard out-of-order packets
 - [x] Refactor movement out of listener task into game tick task
 - [x] Collision detection against map using `shared::map::is_wall()`
-- [ ] Support minimum 10 simultaneous connections (verify and test)
+- [x] Support minimum 10 simultaneous connections (verify and test)
 
 ---
 
