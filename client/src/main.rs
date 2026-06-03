@@ -1,7 +1,6 @@
 // client — entry point
-// Responsibilities:
-//   Main thread    — winit event loop, render (raycaster placeholder for Day 1)
-//   Network thread — UDP send/receive, communicates with main via mpsc channel
+// Main thread    — winit event loop + raycaster render
+// Network thread — UDP send/receive via mpsc channel
 
 use std::net::UdpSocket;
 use std::sync::Arc;
@@ -19,27 +18,27 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use shared::map::Map;
 use shared::protocol::{InputPacket, StatePacket, MAX_PACKET_BYTES};
 
-const WIDTH: u32 = 640;
+const WIDTH: u32  = 640;
 const HEIGHT: u32 = 480;
 const NET_HZ: u64 = 60;
+const FOV_PLANE: f32 = 0.66; // half-width of camera plane → ~66° horizontal FOV
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(name = "maze-runner")]
 struct Args {
-    /// Server address, e.g. 127.0.0.1:34254
     #[arg(short, long, default_value = "127.0.0.1:34254")]
     server: String,
 
-    /// Player username shown in server logs
     #[arg(short, long, default_value = "player")]
     username: String,
 }
 
-// ── Input flags shared between the event loop and the network thread ──────────
+// ── Input flags shared between event loop and network thread ──────────────────
 
 struct InputFlags {
     forward:    AtomicBool,
@@ -59,7 +58,31 @@ impl InputFlags {
     }
 }
 
-// ── App (winit ApplicationHandler) ───────────────────────────────────────────
+// ── Camera ────────────────────────────────────────────────────────────────────
+
+struct Camera {
+    x: f32, y: f32,
+    dir_x: f32, dir_y: f32,
+    plane_x: f32, plane_y: f32,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        // spawn matches server default: (1.5, 1.5), angle 0 = facing +x
+        Self { x: 1.5, y: 1.5, dir_x: 1.0, dir_y: 0.0, plane_x: 0.0, plane_y: FOV_PLANE }
+    }
+}
+
+impl Camera {
+    fn set_angle(&mut self, angle: f32) {
+        self.dir_x   =  angle.cos();
+        self.dir_y   =  angle.sin();
+        self.plane_x = -angle.sin() * FOV_PLANE;
+        self.plane_y =  angle.cos() * FOV_PLANE;
+    }
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
 
 struct App {
     window:     Option<Arc<Window>>,
@@ -68,6 +91,10 @@ struct App {
     input:      Arc<InputFlags>,
     last_state: Option<StatePacket>,
     args:       Args,
+    cam:        Camera,
+    map:        Map,
+    z_buf:      Vec<f32>, // per-column wall distance — used by sprite pass on Day 3
+    local_id:   Option<u32>,
 }
 
 impl ApplicationHandler for App {
@@ -82,36 +109,20 @@ impl ApplicationHandler for App {
                 )
                 .expect("failed to create window"),
         );
-
         let surface = SurfaceTexture::new(WIDTH, HEIGHT, Arc::clone(&window));
-        let pixels = Pixels::new(WIDTH, HEIGHT, surface).expect("failed to create pixel buffer");
-
+        let pixels  = Pixels::new(WIDTH, HEIGHT, surface).expect("pixels init failed");
         window.request_redraw();
         self.window = Some(window);
         self.pixels = Some(pixels);
-
-        println!(
-            "Maze Runner FPS — user: '{}' | server: {}",
-            self.args.username, self.args.server
-        );
+        println!("Maze Runner FPS — user: '{}' | server: {}", self.args.username, self.args.server);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(code),
-                    state,
-                    ..
-                },
-                ..
+                event: KeyEvent { physical_key: PhysicalKey::Code(code), state, .. }, ..
             } => {
                 let pressed = state == ElementState::Pressed;
                 match code {
@@ -125,14 +136,11 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                // drain channel — keep only the latest state
                 while let Ok(state) = self.state_rx.try_recv() {
                     self.last_state = Some(state);
                 }
                 self.render();
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                if let Some(w) = &self.window { w.request_redraw(); }
             }
 
             _ => {}
@@ -140,13 +148,132 @@ impl ApplicationHandler for App {
     }
 }
 
+// ── Render helpers ────────────────────────────────────────────────────────────
+
 fn lerp(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t).clamp(0.0, 255.0) as u8
 }
 
 fn star(row: usize, col: usize) -> bool {
-    let h = row.wrapping_mul(2654435761) ^ col.wrapping_mul(2246822519);
-    h % 300 == 0
+    (row.wrapping_mul(2654435761) ^ col.wrapping_mul(2246822519)) % 300 == 0
+}
+
+// Pass 1 — synthwave sky + perspective-grid floor
+fn draw_background(frame: &mut [u8]) {
+    let mid    = (HEIGHT / 2) as usize;
+    let half_h = HEIGHT as f32 / 2.0;
+
+    for (i, px) in frame.chunks_exact_mut(4).enumerate() {
+        let row = i / WIDTH as usize;
+        let col = i % WIDTH as usize;
+
+        if row < mid {
+            let t = row as f32 / mid as f32;
+            if t < 0.7 && star(row, col) {
+                let b = lerp(0xaa, 0xff, t);
+                px[0] = b; px[1] = b; px[2] = b;
+            } else {
+                px[0] = lerp(0x02, 0x2a, t);
+                px[1] = 0x00;
+                px[2] = lerp(0x10, 0x40, t);
+            }
+        } else if row == mid {
+            px[0] = 0xff; px[1] = 0x10; px[2] = 0xc8; // hot-pink horizon
+        } else {
+            let t          = (row - mid) as f32 / mid as f32;
+            let floor_dist = half_h / (row as f32 - half_h).max(0.5);
+            let world_x    = (col as f32 / WIDTH as f32 - 0.5) * 2.0 * floor_dist;
+            let world_y    = floor_dist;
+            let pw         = 2.0 * floor_dist / WIDTH as f32;
+            let lw         = pw * 1.5;
+            let on_grid    = world_x.fract().abs() < lw
+                || (1.0 - world_x.fract().abs()) < lw
+                || world_y.fract().abs() < lw
+                || (1.0 - world_y.fract().abs()) < lw;
+
+            if on_grid {
+                let bright = (1.0 - t * 0.85).max(0.05);
+                px[0] = 0x00;
+                px[1] = (0xff as f32 * bright) as u8;
+                px[2] = (0xff as f32 * bright) as u8;
+            } else {
+                px[0] = lerp(0x0d, 0x04, t);
+                px[1] = 0x00;
+                px[2] = lerp(0x1a, 0x06, t);
+            }
+        }
+        px[3] = 0xff;
+    }
+}
+
+// Pass 2 — DDA raycaster, one ray per column
+fn cast_walls(frame: &mut [u8], cam: &Camera, map: &Map, z_buf: &mut [f32]) {
+    let mid = HEIGHT as i32 / 2;
+
+    for x in 0..WIDTH as usize {
+        // ray direction for this column
+        let cam_x   = 2.0 * x as f32 / WIDTH as f32 - 1.0; // -1 (left) to 1 (right)
+        let ray_dx  = cam.dir_x + cam.plane_x * cam_x;
+        let ray_dy  = cam.dir_y + cam.plane_y * cam_x;
+
+        let mut map_x = cam.x as i32;
+        let mut map_y = cam.y as i32;
+
+        // how far to travel along the ray to cross one cell boundary
+        let ddx = if ray_dx == 0.0 { f32::INFINITY } else { (1.0 / ray_dx).abs() };
+        let ddy = if ray_dy == 0.0 { f32::INFINITY } else { (1.0 / ray_dy).abs() };
+
+        // step direction and initial fractional distance to first boundary
+        let (step_x, mut sdx) = if ray_dx < 0.0 {
+            (-1i32, (cam.x - map_x as f32) * ddx)
+        } else {
+            (1i32, (map_x as f32 + 1.0 - cam.x) * ddx)
+        };
+        let (step_y, mut sdy) = if ray_dy < 0.0 {
+            (-1i32, (cam.y - map_y as f32) * ddy)
+        } else {
+            (1i32, (map_y as f32 + 1.0 - cam.y) * ddy)
+        };
+
+        // DDA — step until wall hit (max 32 iterations for 16×16 map)
+        let mut side = 0u8; // 0 = hit vertical cell boundary (N/S wall face)
+                            // 1 = hit horizontal cell boundary (E/W wall face)
+        for _ in 0..32 {
+            if sdx < sdy { sdx += ddx; map_x += step_x; side = 0; }
+            else         { sdy += ddy; map_y += step_y; side = 1; }
+            if map_x < 0 || map_y < 0 { break; }
+            if map.is_wall(map_x as usize, map_y as usize) { break; }
+        }
+
+        // perpendicular wall distance — avoids fisheye distortion
+        let perp = (if side == 0 { sdx - ddx } else { sdy - ddy }).max(0.001);
+        z_buf[x] = perp;
+
+        // wall strip height on screen
+        let line_h    = (HEIGHT as f32 / perp) as i32;
+        let draw_top  = (mid - line_h / 2).max(0) as usize;
+        let draw_bot  = (mid + line_h / 2).min(HEIGHT as i32 - 1) as usize;
+
+        // brightness falls off with distance — keeps close walls punchy
+        let bright = (1.5 / perp).clamp(0.15, 1.0);
+
+        for row in draw_top..=draw_bot {
+            let idx = (row * WIDTH as usize + x) * 4;
+            if side == 0 {
+                // N/S face — neon cyan
+                frame[idx]     = 0x00;
+                frame[idx + 1] = (0xff as f32 * bright) as u8;
+                frame[idx + 2] = (0xdd as f32 * bright) as u8;
+            } else {
+                // E/W face — neon magenta, slightly dimmer for depth
+                let b = bright * 0.65;
+                frame[idx]     = (0xcc as f32 * b) as u8;
+                frame[idx + 1] = 0x00;
+                frame[idx + 2] = (0xff as f32 * b) as u8;
+            }
+            frame[idx + 3] = 0xff;
+        }
+    }
 }
 
 impl App {
@@ -156,76 +283,23 @@ impl App {
             None => return,
         };
 
-        let frame = pixels.frame_mut();
-
-        // synthwave placeholder — sky, neon horizon, perspective grid floor
-        // entire render replaced by raycaster on Day 2
-        let mid = (HEIGHT / 2) as usize;
-        let half_h = HEIGHT as f32 / 2.0;
-
-        for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
-            let row = i / WIDTH as usize;
-            let col = i % WIDTH as usize;
-
-            if row < mid {
-                // sky: near-black at top → deep purple at horizon
-                let t = row as f32 / mid as f32;
-                let r = lerp(0x02, 0x2a, t);
-                let g = lerp(0x00, 0x00, t);
-                let b = lerp(0x10, 0x40, t);
-
-                // sparse stars in upper 70% of sky
-                if t < 0.7 && star(row, col) {
-                    let bright = lerp(0xaa, 0xff, t);
-                    pixel[0] = bright;
-                    pixel[1] = bright;
-                    pixel[2] = bright;
-                } else {
-                    pixel[0] = r;
-                    pixel[1] = g;
-                    pixel[2] = b;
-                }
-            } else if row == mid {
-                // neon horizon line — hot pink
-                pixel[0] = 0xff;
-                pixel[1] = 0x10;
-                pixel[2] = 0xc8;
-            } else {
-                // floor: perspective grid in neon cyan on deep purple
-                let t = (row - mid) as f32 / mid as f32;
-                let floor_dist = half_h / (row as f32 - half_h).max(0.5);
-
-                // world coords at this pixel (90° horizontal FOV)
-                let world_x = (col as f32 / WIDTH as f32 - 0.5) * 2.0 * floor_dist;
-                let world_y = floor_dist;
-
-                // grid line threshold: ~1.5px wide in world space
-                let pw = 2.0 * floor_dist / WIDTH as f32;
-                let lw = pw * 1.5;
-                let on_grid = world_x.fract().abs() < lw
-                    || (1.0 - world_x.fract().abs()) < lw
-                    || world_y.fract().abs() < lw
-                    || (1.0 - world_y.fract().abs()) < lw;
-
-                if on_grid {
-                    // neon cyan fading to dark with distance
-                    let bright = (1.0 - t * 0.85).max(0.05);
-                    pixel[0] = 0x00;
-                    pixel[1] = (0xff as f32 * bright) as u8;
-                    pixel[2] = (0xff as f32 * bright) as u8;
-                } else {
-                    pixel[0] = lerp(0x0d, 0x04, t);
-                    pixel[1] = 0x00;
-                    pixel[2] = lerp(0x1a, 0x06, t);
+        // sync camera to authoritative server position
+        if let Some(state) = &self.last_state {
+            if self.local_id.is_none() {
+                self.local_id = Some(state.your_id);
+            }
+            if let Some(id) = self.local_id {
+                if let Some(p) = state.players.iter().find(|p| p.id == id) {
+                    self.cam.x = p.x;
+                    self.cam.y = p.y;
+                    self.cam.set_angle(p.angle);
                 }
             }
-            pixel[3] = 0xff;
         }
 
-        // show live player count from latest state
-        if let Some(state) = &self.last_state {
-            let _ = state; // raycaster will consume this on Day 2
-        }
+        let frame = pixels.frame_mut();
+        draw_background(frame);
+        cast_walls(frame, &self.cam, &self.map, &mut self.z_buf);
 
         if let Err(e) = pixels.render() {
             eprintln!("render error: {e}");
@@ -235,57 +309,39 @@ impl App {
 
 // ── Network thread ────────────────────────────────────────────────────────────
 
-fn net_thread(
-    server_addr: String,
-    input: Arc<InputFlags>,
-    state_tx: mpsc::SyncSender<StatePacket>,
-) {
-    let socket = UdpSocket::bind("0.0.0.0:0").expect("client: failed to bind socket");
-    socket.connect(&server_addr).expect("client: failed to connect to server");
-    socket
-        .set_read_timeout(Some(Duration::from_millis(1)))
-        .expect("client: set_read_timeout failed");
-
+fn net_thread(server_addr: String, input: Arc<InputFlags>, state_tx: mpsc::SyncSender<StatePacket>) {
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("client: bind failed");
+    socket.connect(&server_addr).expect("client: connect failed");
+    socket.set_read_timeout(Some(Duration::from_millis(1))).expect("set_read_timeout failed");
     println!("network thread connected to {}", server_addr);
 
-    let interval = Duration::from_millis(1000 / NET_HZ);
-    let mut sequence: u32 = 0;
-    let mut recv_buf = vec![0u8; MAX_PACKET_BYTES];
+    let interval  = Duration::from_millis(1000 / NET_HZ);
+    let mut seq   = 0u32;
+    let mut buf   = vec![0u8; MAX_PACKET_BYTES];
 
     loop {
-        let frame_start = Instant::now();
+        let t0 = Instant::now();
+        seq += 1;
 
-        // send input packet
-        sequence += 1;
         let pkt = InputPacket {
-            sequence,
-            player_id: 0,
+            sequence:    seq,
+            player_id:   0,
             session_token: 0,
             forward:    input.forward.load(Ordering::Relaxed),
             backward:   input.backward.load(Ordering::Relaxed),
             turn_left:  input.turn_left.load(Ordering::Relaxed),
             turn_right: input.turn_right.load(Ordering::Relaxed),
         };
-        if let Ok(encoded) = postcard::to_allocvec(&pkt) {
-            let _ = socket.send(&encoded);
-        }
+        if let Ok(enc) = postcard::to_allocvec(&pkt) { let _ = socket.send(&enc); }
 
-        // receive — 1ms timeout so we never block the send loop
-        match socket.recv(&mut recv_buf) {
-            Ok(len) => {
-                if let Ok(state) = postcard::from_bytes::<StatePacket>(&recv_buf[..len]) {
-                    // try_send: drop stale states if render loop is behind
-                    let _ = state_tx.try_send(state);
-                }
+        if let Ok(len) = socket.recv(&mut buf) {
+            if let Ok(state) = postcard::from_bytes::<StatePacket>(&buf[..len]) {
+                let _ = state_tx.try_send(state);
             }
-            Err(_) => {} // timeout or nothing available
         }
 
-        // pace to NET_HZ
-        let elapsed = frame_start.elapsed();
-        if elapsed < interval {
-            thread::sleep(interval - elapsed);
-        }
+        let elapsed = t0.elapsed();
+        if elapsed < interval { thread::sleep(interval - elapsed); }
     }
 }
 
@@ -295,23 +351,26 @@ fn main() {
     let args = Args::parse();
 
     let input = Arc::new(InputFlags::new());
-    // capacity 1: render loop always gets the freshest StatePacket
     let (state_tx, state_rx) = mpsc::sync_channel::<StatePacket>(1);
 
     {
         let server = args.server.clone();
-        let input = Arc::clone(&input);
+        let input  = Arc::clone(&input);
         thread::spawn(move || net_thread(server, input, state_tx));
     }
 
-    let event_loop = EventLoop::new().expect("failed to create event loop");
+    let event_loop = EventLoop::new().expect("event loop failed");
     let mut app = App {
-        window: None,
-        pixels: None,
+        window:     None,
+        pixels:     None,
         state_rx,
         input,
         last_state: None,
         args,
+        cam:      Camera::default(),
+        map:      shared::map::get_level(1),
+        z_buf:    vec![0.0f32; WIDTH as usize],
+        local_id: None,
     };
 
     event_loop.run_app(&mut app).expect("event loop error");

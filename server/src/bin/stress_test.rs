@@ -128,17 +128,20 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
         sequence = sequence.wrapping_add(1);
         let players = players.lock().await;
         if players.is_empty() { continue; }
-        let state = shared::protocol::StatePacket {
-            sequence,
-            players: players.values().map(|p| shared::protocol::PlayerState {
-                id: p.id, x: p.x, y: p.y, angle: p.angle,
-            }).collect(),
-        };
-        let encoded = match postcard::to_allocvec(&state) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        for addr in players.keys() {
+        let player_list: Vec<shared::protocol::PlayerState> = players.values()
+            .map(|p| shared::protocol::PlayerState { id: p.id, x: p.x, y: p.y, angle: p.angle })
+            .collect();
+        // stress test broadcasts the same packet to all clients (your_id unused in test)
+        for (addr, player) in players.iter() {
+            let state = shared::protocol::StatePacket {
+                sequence,
+                your_id: player.id,
+                players: player_list.clone(),
+            };
+            let encoded = match postcard::to_allocvec(&state) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
             let _ = socket.send_to(&encoded, addr).await;
         }
     }

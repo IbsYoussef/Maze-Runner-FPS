@@ -24,6 +24,7 @@ pub struct InputPacket {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StatePacket {
     pub sequence: u32,
+    pub your_id: u32,   // which player in the list is the receiver
     pub players: Vec<PlayerState>,
 }
 
