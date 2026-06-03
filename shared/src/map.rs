@@ -6,7 +6,8 @@
 pub struct Map {
     pub width: usize,
     pub height: usize,
-    pub cells: Vec<u8>, // 0 = empty, 1 = wall
+    pub cells: Vec<u8>,      // 0 = empty, 1 = wall
+    pub miner_pos: (f32, f32), // world-space position of the trapped miner
 }
 
 impl Map {
@@ -19,11 +20,14 @@ impl Map {
 }
 
 // 1 = wall, 0 = open — all levels are 16x16
+// Miner positions sit at the far end of the open top corridor (row 1, x=13).
+// Row 1 is guaranteed open on all three levels.
+
 // Level 1: simple corridors
 pub fn level_1() -> Map {
     Map {
-        width: 16,
-        height: 16,
+        width: 16, height: 16,
+        miner_pos: (13.5, 1.5), // far end of top corridor, opposite spawn
         cells: vec![
             1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 1,
@@ -41,8 +45,8 @@ pub fn level_1() -> Map {
 // Level 2: more dead ends, tighter corridors
 pub fn level_2() -> Map {
     Map {
-        width: 16,
-        height: 16,
+        width: 16, height: 16,
+        miner_pos: (13.5, 1.5),
         cells: vec![
             1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0,
             0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0,
@@ -60,8 +64,8 @@ pub fn level_2() -> Map {
 // Level 3: dense maze, longest paths
 pub fn level_3() -> Map {
     Map {
-        width: 16,
-        height: 16,
+        width: 16, height: 16,
+        miner_pos: (13.5, 1.5),
         cells: vec![
             1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0,
             1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0,

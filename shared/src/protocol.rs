@@ -24,7 +24,8 @@ pub struct InputPacket {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StatePacket {
     pub sequence: u32,
-    pub your_id: u32,   // which player in the list is the receiver
+    pub your_id: u32,
+    pub miner_rescued: bool,
     pub players: Vec<PlayerState>,
 }
 
@@ -34,4 +35,5 @@ pub struct PlayerState {
     pub x: f32,
     pub y: f32,
     pub angle: f32,
+    pub fuel: f32, // 0.0–100.0
 }

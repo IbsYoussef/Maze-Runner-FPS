@@ -35,6 +35,7 @@ struct Player {
     x: f32,
     y: f32,
     angle: f32,
+    fuel: f32,
     session_token: u64,
     last_sequence: u32,
     last_seen: Instant,
@@ -68,6 +69,7 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
             players.insert(src, Player {
                 id: next_id,
                 x: 1.5, y: 1.5, angle: 0.0,
+                fuel: 100.0,
                 session_token: token,
                 last_sequence: 0,
                 last_seen: Instant::now(),
@@ -129,13 +131,13 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
         let players = players.lock().await;
         if players.is_empty() { continue; }
         let player_list: Vec<shared::protocol::PlayerState> = players.values()
-            .map(|p| shared::protocol::PlayerState { id: p.id, x: p.x, y: p.y, angle: p.angle })
+            .map(|p| shared::protocol::PlayerState { id: p.id, x: p.x, y: p.y, angle: p.angle, fuel: p.fuel })
             .collect();
-        // stress test broadcasts the same packet to all clients (your_id unused in test)
         for (addr, player) in players.iter() {
             let state = shared::protocol::StatePacket {
                 sequence,
                 your_id: player.id,
+                miner_rescued: false,
                 players: player_list.clone(),
             };
             let encoded = match postcard::to_allocvec(&state) {
