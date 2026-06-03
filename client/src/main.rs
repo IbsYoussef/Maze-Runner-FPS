@@ -95,6 +95,9 @@ struct App {
     map:        Map,
     z_buf:      Vec<f32>, // per-column wall distance — used by sprite pass on Day 3
     local_id:   Option<u32>,
+    fps_timer:  Instant,
+    fps_count:  u32,
+    fps:        f32,
 }
 
 impl ApplicationHandler for App {
@@ -138,6 +141,13 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 while let Ok(state) = self.state_rx.try_recv() {
                     self.last_state = Some(state);
+                }
+                self.fps_count += 1;
+                let elapsed = self.fps_timer.elapsed();
+                if elapsed.as_secs_f32() >= 0.5 {
+                    self.fps = self.fps_count as f32 / elapsed.as_secs_f32();
+                    self.fps_count = 0;
+                    self.fps_timer = Instant::now();
                 }
                 self.render();
                 if let Some(w) = &self.window { w.request_redraw(); }
@@ -276,6 +286,65 @@ fn cast_walls(frame: &mut [u8], cam: &Camera, map: &Map, z_buf: &mut [f32]) {
     }
 }
 
+// ── FPS counter — 3×5 pixel bitmap font, 2× scaled, neon yellow ──────────────
+
+const DIGITS_3X5: [[u8; 5]; 10] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111], // 0
+    [0b010, 0b110, 0b010, 0b010, 0b111], // 1
+    [0b111, 0b001, 0b111, 0b100, 0b111], // 2
+    [0b111, 0b001, 0b111, 0b001, 0b111], // 3
+    [0b101, 0b101, 0b111, 0b001, 0b001], // 4
+    [0b111, 0b100, 0b111, 0b001, 0b111], // 5
+    [0b111, 0b100, 0b111, 0b101, 0b111], // 6
+    [0b111, 0b001, 0b001, 0b001, 0b001], // 7
+    [0b111, 0b101, 0b111, 0b101, 0b111], // 8
+    [0b111, 0b101, 0b111, 0b001, 0b111], // 9
+];
+
+const SCALE: usize = 2;               // each font pixel → 2×2 screen pixels
+const DW:    usize = 3 * SCALE;       // digit width  in screen pixels
+const DH:    usize = 5 * SCALE;       // digit height in screen pixels
+const GAP:   usize = 2;               // gap between digits
+const PAD:   usize = 4;               // padding around the number
+
+fn draw_fps(frame: &mut [u8], fps: f32) {
+    let n = fps as u32;
+    let digits: &[usize] = if n >= 100 {
+        &[(n / 100 % 10) as usize, (n / 10 % 10) as usize, (n % 10) as usize]
+    } else if n >= 10 {
+        &[(n / 10 % 10) as usize, (n % 10) as usize]
+    } else {
+        &[(n % 10) as usize]
+    };
+
+    let bg_w = digits.len() * DW + (digits.len() - 1) * GAP + PAD * 2;
+    let bg_h = DH + PAD * 2;
+
+    // dark background
+    for row in 0..bg_h {
+        for col in 0..bg_w {
+            let idx = (row * WIDTH as usize + col) * 4;
+            frame[idx] = 0x00; frame[idx+1] = 0x00; frame[idx+2] = 0x00; frame[idx+3] = 0xff;
+        }
+    }
+
+    // draw digits
+    for (di, &d) in digits.iter().enumerate() {
+        let ox = PAD + di * (DW + GAP);
+        let oy = PAD;
+        for (r, &bits) in DIGITS_3X5[d].iter().enumerate() {
+            for c in 0..3usize {
+                if bits & (1 << (2 - c)) != 0 {
+                    for sy in 0..SCALE { for sx in 0..SCALE {
+                        let idx = ((oy + r * SCALE + sy) * WIDTH as usize + ox + c * SCALE + sx) * 4;
+                        frame[idx] = 0xff; frame[idx+1] = 0xff; frame[idx+2] = 0x00; frame[idx+3] = 0xff;
+                    }}
+                }
+            }
+        }
+    }
+}
+
 impl App {
     fn render(&mut self) {
         let pixels = match &mut self.pixels {
@@ -300,6 +369,7 @@ impl App {
         let frame = pixels.frame_mut();
         draw_background(frame);
         cast_walls(frame, &self.cam, &self.map, &mut self.z_buf);
+        draw_fps(frame, self.fps);
 
         if let Err(e) = pixels.render() {
             eprintln!("render error: {e}");
@@ -367,10 +437,13 @@ fn main() {
         input,
         last_state: None,
         args,
-        cam:      Camera::default(),
-        map:      shared::map::get_level(1),
-        z_buf:    vec![0.0f32; WIDTH as usize],
-        local_id: None,
+        cam:       Camera::default(),
+        map:       shared::map::get_level(1),
+        z_buf:     vec![0.0f32; WIDTH as usize],
+        local_id:  None,
+        fps_timer: Instant::now(),
+        fps_count: 0,
+        fps:       0.0,
     };
 
     event_loop.run_app(&mut app).expect("event loop error");
