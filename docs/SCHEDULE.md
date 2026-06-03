@@ -4,19 +4,19 @@ End-of-week target: project complete, `cargo build --release` clean, submitted t
 
 ---
 
-## Status Snapshot (June 3)
+## Status Snapshot (June 3 — end of day)
 
 | Phase | Description | Status |
 |---|---|---|
 | 1 | Foundation (workspace, CI, git) | ✅ Done |
 | 2 | Shared types (protocol, map) | ✅ Done |
-| 3 | Server (UDP, tick, broadcast, collisions) | ✅ ~95% — 10-connection test remaining |
-| 4 | Client (raycaster, network, window) | ❌ Empty — entire client is remaining work |
-| 5 | Integration | ❌ Not started |
-| 6 | Polish & performance | ❌ Not started |
+| 3 | Server (UDP, tick, broadcast, collisions, fuel, miner) | ✅ Done |
+| 4 | Client (raycaster, network, HUD, sprites, H.E.R.O. tribute) | ✅ Done |
+| 5 | Integration | 🔄 localhost verified, LAN + level select remaining |
+| 6 | Polish & performance | 🔄 visual polish done, release FPS + shooting + win screen remaining |
 | 7 | Submission | ❌ Not started |
 
-The client is the critical path. All Phase 5–7 work is blocked on it.
+Days 1–3 completed ahead of schedule. Remaining work fits within Day 4 scope.
 
 ---
 

@@ -38,30 +38,40 @@ Tracks all work from setup to submission. Updated as tasks are completed.
 - [x] Refactor movement out of listener task into game tick task
 - [x] Collision detection against map using `shared::map::is_wall()`
 - [x] Support minimum 10 simultaneous connections (verify and test)
+- [x] Fuel drain per tick (~90s supply) with respawn after 3s on empty
+- [x] Miner rescue detection — proximity check within 0.8 world units
+- [x] Per-player `StatePacket` broadcast with `your_id` and `miner_rescued`
 
 ---
 
-## Phase 4 — Client 🔄
+## Phase 4 — Client ✅
 
-- [ ] CLI prompt for server IP address and username on startup
-- [ ] UDP network thread (send `InputPacket`, receive `StatePacket`)
-- [ ] `mpsc` channel between network thread and render loop
-- [ ] Window setup with `winit`
-- [ ] Pixel buffer with `pixels`
-- [ ] Raycaster render loop (DDA algorithm, fisheye correction)
-- [ ] Wall shading based on distance
-- [ ] Other player sprites rendered in world
-- [ ] Mini-map overlay showing player position and map layout
-- [ ] FPS counter displayed on screen
+- [x] CLI prompt for server IP address and username on startup (`--server`, `--username`)
+- [x] UDP network thread (send `InputPacket` at 60 hz, receive `StatePacket`)
+- [x] `mpsc` channel between network thread and render loop
+- [x] Window setup with `winit` 0.30 (`ApplicationHandler` trait, `Arc<Window>`)
+- [x] Pixel buffer with `pixels` 0.17 (`Pixels<'static>` via `Arc<Window>`)
+- [x] Raycaster render loop (DDA algorithm, fisheye correction, per-column z-buffer)
+- [x] Wall shading based on distance + column-stripe texture pattern
+- [x] Other player sprites rendered in world (billboard, z-buffer clipped, edge outline)
+- [x] Miner sprite rendered as pixel-art figure (hard hat, body, legs, transparent bg)
+- [x] Mini-map overlay — 4×4 dots, bright centre, direction arrow for local player
+- [x] FPS counter displayed on screen (3×5 bitmap font, neon yellow, top-left)
+- [x] Synthwave aesthetic — starfield sky, neon horizon, perspective grid floor, vignette
+- [x] Fuel bar — bottom of screen, colour shifts green → yellow → red
+- [x] Gold rescue flash — border effect fades over 3s when miner is rescued
+- [x] Client-side prediction — movement applied locally, no server round-trip lag
+- [x] `ControlFlow::Poll` — continuous event loop, no key-event queuing
+- [x] Bot binary (`client --bin bot`) — simulated player for multiplayer testing
 
 ---
 
-## Phase 5 — Integration
+## Phase 5 — Integration 🔄
 
-- [ ] Client and server running on same machine communicating over UDP
+- [x] Client and server running on same machine communicating over UDP
 - [ ] Client and server running on separate machines over LAN
-- [ ] Multiple clients connecting simultaneously (test with 3+ players)
-- [ ] Player positions syncing correctly across all clients
+- [x] Multiple clients connecting simultaneously (bot + manual client verified)
+- [x] Player positions syncing correctly across all clients
 - [ ] Level selection working across all 3 levels
 
 ---
@@ -69,10 +79,12 @@ Tracks all work from setup to submission. Updated as tasks are completed.
 ## Phase 6 — Polish & Performance
 
 - [ ] Consistent 50+ FPS in release mode (`cargo run --release`)
-- [ ] Clean disconnect handling (player removed on timeout)
+- [x] Clean disconnect handling (server timeout removes player after 10s)
 - [ ] Level transitions working correctly
 - [ ] Critical event ACK layer (player death, level change)
 - [ ] Basic shooting mechanic
+- [ ] Onscreen objective text ("FIND THE MINER", distance indicator)
+- [ ] Win/rescue screen on miner reached
 
 ---
 
@@ -95,4 +107,4 @@ Tracks all work from setup to submission. Updated as tasks are completed.
 
 ---
 
-_Last updated: June 2026_
+_Last updated: June 3, 2026_
