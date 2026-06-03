@@ -141,7 +141,12 @@ impl ApplicationHandler for App {
 }
 
 fn lerp(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t) as u8
+    (a as f32 + (b as f32 - a as f32) * t).clamp(0.0, 255.0) as u8
+}
+
+fn star(row: usize, col: usize) -> bool {
+    let h = row.wrapping_mul(2654435761) ^ col.wrapping_mul(2246822519);
+    h % 300 == 0
 }
 
 impl App {
@@ -153,22 +158,66 @@ impl App {
 
         let frame = pixels.frame_mut();
 
-        // placeholder sky / floor gradients — replaced by raycaster on Day 2
+        // synthwave placeholder — sky, neon horizon, perspective grid floor
+        // entire render replaced by raycaster on Day 2
         let mid = (HEIGHT / 2) as usize;
+        let half_h = HEIGHT as f32 / 2.0;
+
         for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
             let row = i / WIDTH as usize;
+            let col = i % WIDTH as usize;
+
             if row < mid {
-                // sky: black at top → deep violet at horizon
+                // sky: near-black at top → deep purple at horizon
                 let t = row as f32 / mid as f32;
-                pixel[0] = lerp(0x00, 0x6a, t);
-                pixel[1] = lerp(0x00, 0x00, t);
-                pixel[2] = lerp(0x00, 0xcc, t);
+                let r = lerp(0x02, 0x2a, t);
+                let g = lerp(0x00, 0x00, t);
+                let b = lerp(0x10, 0x40, t);
+
+                // sparse stars in upper 70% of sky
+                if t < 0.7 && star(row, col) {
+                    let bright = lerp(0xaa, 0xff, t);
+                    pixel[0] = bright;
+                    pixel[1] = bright;
+                    pixel[2] = bright;
+                } else {
+                    pixel[0] = r;
+                    pixel[1] = g;
+                    pixel[2] = b;
+                }
+            } else if row == mid {
+                // neon horizon line — hot pink
+                pixel[0] = 0xff;
+                pixel[1] = 0x10;
+                pixel[2] = 0xc8;
             } else {
-                // floor: burnt orange at horizon → near-black at bottom
+                // floor: perspective grid in neon cyan on deep purple
                 let t = (row - mid) as f32 / mid as f32;
-                pixel[0] = lerp(0xcc, 0x18, t);
-                pixel[1] = lerp(0x55, 0x08, t);
-                pixel[2] = lerp(0x00, 0x00, t);
+                let floor_dist = half_h / (row as f32 - half_h).max(0.5);
+
+                // world coords at this pixel (90° horizontal FOV)
+                let world_x = (col as f32 / WIDTH as f32 - 0.5) * 2.0 * floor_dist;
+                let world_y = floor_dist;
+
+                // grid line threshold: ~1.5px wide in world space
+                let pw = 2.0 * floor_dist / WIDTH as f32;
+                let lw = pw * 1.5;
+                let on_grid = world_x.fract().abs() < lw
+                    || (1.0 - world_x.fract().abs()) < lw
+                    || world_y.fract().abs() < lw
+                    || (1.0 - world_y.fract().abs()) < lw;
+
+                if on_grid {
+                    // neon cyan fading to dark with distance
+                    let bright = (1.0 - t * 0.85).max(0.05);
+                    pixel[0] = 0x00;
+                    pixel[1] = (0xff as f32 * bright) as u8;
+                    pixel[2] = (0xff as f32 * bright) as u8;
+                } else {
+                    pixel[0] = lerp(0x0d, 0x04, t);
+                    pixel[1] = 0x00;
+                    pixel[2] = lerp(0x1a, 0x06, t);
+                }
             }
             pixel[3] = 0xff;
         }
