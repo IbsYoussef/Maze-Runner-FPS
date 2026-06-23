@@ -234,28 +234,32 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
             continue;
         }
 
-        let state = StatePacket {
-            sequence,
-            players: players
-                .values()
-                .map(|p| PlayerState {
-                    id: p.id,
-                    x: p.x,
-                    y: p.y,
-                    angle: p.angle,
-                })
-                .collect(),
-        };
+        // build the player list once, reuse for every client
+        let player_list: Vec<PlayerState> = players
+            .values()
+            .map(|p| PlayerState {
+                id: p.id,
+                x: p.x,
+                y: p.y,
+                angle: p.angle,
+                fuel: 100.0, // placeholder until fuel system is added
+            })
+            .collect();
 
-        let encoded = match postcard::to_allocvec(&state) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!("serialize error: {e}");
-                continue;
-            }
-        };
-
-        for addr in players.keys() {
+        // send each client a StatePacket with their own your_id set
+        for (addr, player) in players.iter() {
+            let state = StatePacket {
+                sequence,
+                your_id: player.id,
+                players: player_list.clone(),
+            };
+            let encoded = match postcard::to_allocvec(&state) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!("serialize error: {e}");
+                    continue;
+                }
+            };
             if let Err(e) = socket.send_to(&encoded, addr).await {
                 tracing::warn!("send error to {addr}: {e}");
             }
