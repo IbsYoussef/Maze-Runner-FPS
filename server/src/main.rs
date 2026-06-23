@@ -23,6 +23,10 @@ const PLAYER_SPEED: f32 = 0.05;
 const PLAYER_TURN_SPEED: f32 = 0.04;
 const TIMEOUT_SECS: u64 = 10;
 const RATE_LIMIT_PER_SEC: u32 = 128;
+const FUEL_MAX: f32 = 100.0;
+// depletes over ~90s at 62.5 ticks/sec
+const FUEL_DRAIN: f32 = FUEL_MAX / (90.0 * (1000.0 / TICK_MS as f32));
+const RESPAWN_SECS: u64 = 3;
 
 #[derive(Parser, Debug)]
 #[command(name = "maze-wars-server")]
@@ -42,6 +46,8 @@ struct Player {
     x: f32,
     y: f32,
     angle: f32,
+    fuel: f32,
+    respawn_at: Option<Instant>,
     session_token: u64,
     last_sequence: u32,
     last_seen: Instant,
@@ -53,6 +59,36 @@ struct Player {
     input_backward: bool,
     input_turn_left: bool,
     input_turn_right: bool,
+}
+
+impl Player {
+    fn spawn(id: u32, token: u64) -> Self {
+        Self {
+            id,
+            x: 1.5,
+            y: 1.5,
+            angle: 0.0,
+            fuel: FUEL_MAX,
+            respawn_at: None,
+            session_token: token,
+            last_sequence: 0,
+            last_seen: Instant::now(),
+            packet_count: 0,
+            rate_window_start: Instant::now(),
+            input_forward: false,
+            input_backward: false,
+            input_turn_left: false,
+            input_turn_right: false,
+        }
+    }
+
+    fn respawn(&mut self) {
+        self.x = 1.5;
+        self.y = 1.5;
+        self.angle = 0.0;
+        self.fuel = FUEL_MAX;
+        self.respawn_at = None;
+    }
 }
 
 type Players = Arc<Mutex<HashMap<SocketAddr, Player>>>;
@@ -117,24 +153,7 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
             // random session token using address hash + time as entropy source
             let token = src.port() as u64 ^ next_id as u64 ^ 0xdeadbeefcafe;
             tracing::info!("new player {} from {}", next_id, src);
-            players.insert(
-                src,
-                Player {
-                    id: next_id,
-                    x: 1.5,
-                    y: 1.5,
-                    angle: 0.0,
-                    session_token: token,
-                    last_sequence: 0,
-                    last_seen: Instant::now(),
-                    packet_count: 0,
-                    rate_window_start: Instant::now(),
-                    input_forward: false,
-                    input_backward: false,
-                    input_turn_left: false,
-                    input_turn_right: false,
-                },
-            );
+            players.insert(src, Player::spawn(next_id, token));
             next_id += 1;
         }
 
@@ -191,9 +210,31 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
 
         // apply movement and collision detection for each player
         for player in players.values_mut() {
+            // handler pending respawn
+            if let Some(at) = player.respawn_at {
+                if Instant::now() >= at {
+                    tracing::info!("player {} respawning", player.id);
+                    player.respawn();
+                }
+                continue; // frozen until respawn completes
+            }
+
+            // drain fuel each tick
+            player.fuel -= FUEL_DRAIN;
+            if player.fuel <= 0.0 {
+                player.fuel = 0.0;
+                player.respawn_at = Some(Instant::now() + Duration::from_secs(RESPAWN_SECS));
+                tracing::info!(
+                    "player {} out of fuel, respawn in {}s",
+                    player.id,
+                    RESPAWN_SECS
+                );
+                continue;
+            }
+
+            // movement + collision
             let mut new_x = player.x;
             let mut new_y = player.y;
-
             if player.input_forward {
                 new_x += player.angle.cos() * PLAYER_SPEED;
                 new_y += player.angle.sin() * PLAYER_SPEED;
@@ -209,7 +250,6 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
                 player.angle += PLAYER_TURN_SPEED;
             }
 
-            // only apply new position if it does not land inside a wall
             let nx = new_x as i32;
             let ny = new_y as i32;
             if nx >= 0 && ny >= 0 && !map.is_wall(nx as usize, ny as usize) {
@@ -242,7 +282,7 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
                 x: p.x,
                 y: p.y,
                 angle: p.angle,
-                fuel: 100.0, // placeholder until fuel system is added
+                fuel: p.fuel,
             })
             .collect();
 
