@@ -31,8 +31,8 @@ const PLAYER_SPEED: f32      = 0.05;
 const PLAYER_TURN_SPEED: f32 = 0.04;
 const MOVE_TICK: Duration    = Duration::from_millis(16);
 
-const MINI_CELL: usize = 4;               // px per map tile on the mini-map
-const MINI_X: usize = WIDTH as usize - 16 * MINI_CELL - 8;  // top-right, 8px margin
+const MINI_CELL: usize = 4;
+const MINI_X: usize = WIDTH as usize - 16 * MINI_CELL - 8;
 const MINI_Y: usize = 8;
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -40,8 +40,10 @@ const MINI_Y: usize = 8;
 #[derive(Parser, Debug)]
 #[command(name = "maze-runner")]
 struct Args {
+    /// Server address e.g. 127.0.0.1:34254
     #[arg(short, long, default_value = "127.0.0.1:34254")]
     server: String,
+    /// Player username
     #[arg(short, long, default_value = "player")]
     username: String,
 }
@@ -99,7 +101,7 @@ struct App {
     fps:           f32,
     rescue_flash:  Option<Instant>,
     miner_rescued: bool,
-    move_timer:    Instant, // drives client-side prediction at server tick rate
+    move_timer:    Instant,
 }
 
 impl ApplicationHandler for App {
@@ -123,6 +125,11 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => {
+                if let Some(pixels) = &mut self.pixels {
+                    let _ = pixels.resize_surface(size.width, size.height);
+                }
+            }
             WindowEvent::KeyboardInput {
                 event: KeyEvent { physical_key: PhysicalKey::Code(code), state, .. }, ..
             } => {
@@ -139,8 +146,6 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 while let Ok(s) = self.state_rx.try_recv() { self.last_state = Some(s); }
 
-                // client-side prediction: apply movement at server tick rate
-                // using += keeps us in sync even when frames take longer than 16ms
                 while self.move_timer.elapsed() >= MOVE_TICK {
                     self.apply_movement();
                     self.move_timer += MOVE_TICK;
@@ -160,10 +165,93 @@ impl ApplicationHandler for App {
         }
     }
 
-    // poll mode: process events and redraw as fast as possible — eliminates key lag
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
         if let Some(w) = &self.window { w.request_redraw(); }
+    }
+}
+
+impl App {
+    fn apply_movement(&mut self) {
+        if self.input.turn_left.load(Ordering::Relaxed) {
+            let a = self.cam.dir_y.atan2(self.cam.dir_x) - PLAYER_TURN_SPEED;
+            self.cam.set_angle(a);
+        }
+        if self.input.turn_right.load(Ordering::Relaxed) {
+            let a = self.cam.dir_y.atan2(self.cam.dir_x) + PLAYER_TURN_SPEED;
+            self.cam.set_angle(a);
+        }
+        let mut nx = self.cam.x;
+        let mut ny = self.cam.y;
+        if self.input.forward.load(Ordering::Relaxed) {
+            nx += self.cam.dir_x * PLAYER_SPEED;
+            ny += self.cam.dir_y * PLAYER_SPEED;
+        }
+        if self.input.backward.load(Ordering::Relaxed) {
+            nx -= self.cam.dir_x * PLAYER_SPEED;
+            ny -= self.cam.dir_y * PLAYER_SPEED;
+        }
+        let ix = nx as i32; let iy = ny as i32;
+        if ix >= 0 && iy >= 0 && !self.map.is_wall(ix as usize, iy as usize) {
+            self.cam.x = nx; self.cam.y = ny;
+        }
+    }
+
+    fn render(&mut self) {
+        let pixels = match &mut self.pixels { Some(p) => p, None => return };
+
+        if let Some(state) = &self.last_state {
+            if self.local_id.is_none() { self.local_id = Some(state.your_id); }
+            if state.miner_rescued && !self.miner_rescued {
+                self.miner_rescued = true;
+                self.rescue_flash  = Some(Instant::now());
+            }
+        }
+
+        let frame = pixels.frame_mut();
+
+        draw_background(frame);
+        cast_walls(frame, &self.cam, &self.map, &mut self.z_buf);
+
+        if let Some(state) = &self.last_state {
+            let mut sprites: Vec<(f32, f32, [u8; 3], bool)> = state.players.iter()
+                .filter(|p| Some(p.id) != self.local_id)
+                .map(|p| (p.x, p.y, [0x00u8, 0xffu8, 0xccu8], false))
+                .collect();
+
+            if !state.miner_rescued {
+                let (mx, my) = self.map.miner_pos;
+                sprites.push((mx, my, [0xff, 0xcc, 0x00], true));
+            }
+
+            draw_sprites(frame, &self.cam, &sprites, &self.z_buf);
+            apply_vignette(frame);
+            draw_minimap(frame, &self.map, &self.cam, state);
+
+            let fuel = state.players.iter()
+                .find(|p| Some(p.id) == self.local_id)
+                .map(|p| p.fuel)
+                .unwrap_or(100.0);
+            draw_fuel_bar(frame, fuel);
+        } else {
+            apply_vignette(frame);
+        }
+
+        if let Some(start) = self.rescue_flash {
+            let t = start.elapsed().as_secs_f32() / 3.0;
+            if t < 1.0 { draw_rescue_flash(frame, t); }
+            else { self.rescue_flash = None; }
+        }
+
+        draw_fps(frame, self.fps);
+
+        if let Err(e) = pixels.render() {
+            eprintln!("render error: {e}");
+            if let Some(w) = &self.window {
+                let size = w.inner_size();
+                let _ = self.pixels.as_mut().map(|p| p.resize_surface(size.width, size.height));
+            }
+        }
     }
 }
 
@@ -256,7 +344,6 @@ fn cast_walls(frame: &mut [u8], cam: &Camera, map: &Map, z_buf: &mut [f32]) {
         let perp = (if side == 0 { sdx - ddx } else { sdy - ddy }).max(0.001);
         z_buf[x] = perp;
 
-        // wall texture coordinate — used for column-stripe pattern
         let wall_x = {
             let wx = if side == 0 { cam.y + perp * ray_dy } else { cam.x + perp * ray_dx };
             wx - wx.floor()
@@ -269,7 +356,6 @@ fn cast_walls(frame: &mut [u8], cam: &Camera, map: &Map, z_buf: &mut [f32]) {
         let bright   = (1.5 / perp).clamp(0.15, 1.0);
 
         for row in draw_top..=draw_bot {
-            // column-stripe texture: dark vertical lines every 8 units = concrete block look
             let is_mortar = tex_col % 8 < 1;
             let b = if is_mortar { bright * 0.35 } else { bright };
 
@@ -288,29 +374,29 @@ fn cast_walls(frame: &mut [u8], cam: &Camera, map: &Map, z_buf: &mut [f32]) {
 // ── Miner pixel-art sprite (8 wide × 16 tall) ────────────────────────────────
 // 0=transparent  1=yellow hard hat  2=skin  3=orange suit  4=dark belt
 const MINER_PIX: [[u8; 8]; 16] = [
-    [0,0,1,1,1,1,0,0], // hard hat crown
-    [0,1,1,1,1,1,1,0], // hard hat brim
-    [0,0,2,2,2,2,0,0], // face
-    [0,0,2,2,2,2,0,0], // face
-    [0,3,3,3,3,3,3,0], // shoulders
-    [0,3,3,3,3,3,3,0], // chest
-    [0,3,3,3,3,3,3,0], // chest
-    [4,4,4,4,4,4,4,4], // belt
-    [0,3,3,3,3,3,3,0], // hips
-    [0,3,3,0,0,3,3,0], // upper legs
-    [0,3,3,0,0,3,3,0],
-    [0,3,3,0,0,3,3,0], // lower legs
+    [0,0,1,1,1,1,0,0],
+    [0,1,1,1,1,1,1,0],
+    [0,0,2,2,2,2,0,0],
+    [0,0,2,2,2,2,0,0],
+    [0,3,3,3,3,3,3,0],
+    [0,3,3,3,3,3,3,0],
+    [0,3,3,3,3,3,3,0],
+    [4,4,4,4,4,4,4,4],
+    [0,3,3,3,3,3,3,0],
     [0,3,3,0,0,3,3,0],
     [0,3,3,0,0,3,3,0],
-    [3,3,0,0,0,0,3,3], // feet
+    [0,3,3,0,0,3,3,0],
+    [0,3,3,0,0,3,3,0],
+    [0,3,3,0,0,3,3,0],
+    [3,3,0,0,0,0,3,3],
     [3,3,0,0,0,0,3,3],
 ];
 const MINER_COL: [[u8; 3]; 5] = [
-    [0,0,0],            // 0 transparent
-    [0xff,0xff,0x00],   // 1 yellow hat
-    [0xff,0xcc,0x88],   // 2 skin
-    [0xff,0x88,0x00],   // 3 orange suit
-    [0x88,0x44,0x00],   // 4 dark belt
+    [0,0,0],
+    [0xff,0xff,0x00],
+    [0xff,0xcc,0x88],
+    [0xff,0x88,0x00],
+    [0x88,0x44,0x00],
 ];
 
 // Pass 3 — billboard sprite rendering
@@ -352,7 +438,6 @@ fn draw_sprites(frame: &mut [u8], cam: &Camera, sprites: &[(f32, f32, [u8; 3], b
         let right = right_i as usize;
         let bright = (1.5 / ty).clamp(0.1, 1.0);
 
-        // unclamped edges needed for correct texture coordinate mapping
         let unclamped_left = screen_cx - w / 2;
         let unclamped_top  = mid - h / 2;
 
@@ -373,9 +458,7 @@ fn draw_sprites(frame: &mut [u8], cam: &Camera, sprites: &[(f32, f32, [u8; 3], b
                     frame[idx+1] = (c[1] as f32 * bright) as u8;
                     frame[idx+2] = (c[2] as f32 * bright) as u8;
                 } else {
-                    // player: solid with bright edge outline
-                    let is_edge = col == left || col == right
-                               || row == top  || row == bot;
+                    let is_edge = col == left || col == right || row == top || row == bot;
                     let b = if is_edge { (bright * 1.4).min(1.0) } else { bright * 0.8 };
                     frame[idx]   = (color[0] as f32 * b) as u8;
                     frame[idx+1] = (color[1] as f32 * b) as u8;
@@ -389,7 +472,6 @@ fn draw_sprites(frame: &mut [u8], cam: &Camera, sprites: &[(f32, f32, [u8; 3], b
 
 // Pass 4 — mini-map (top-right corner)
 fn draw_minimap(frame: &mut [u8], map: &Map, cam: &Camera, state: &StatePacket) {
-    // tiles
     for my in 0..map.height {
         for mx in 0..map.width {
             let (r, g, b) = if map.is_wall(mx, my) { (0x44, 0x00, 0x55) } else { (0x0a, 0x00, 0x12) };
@@ -402,7 +484,6 @@ fn draw_minimap(frame: &mut [u8], map: &Map, cam: &Camera, state: &StatePacket) 
         }
     }
 
-    // miner dot — 4×4 gold with bright centre
     if !state.miner_rescued {
         let (mx, my) = map.miner_pos;
         let px = MINI_X + mx as usize * MINI_CELL;
@@ -417,7 +498,6 @@ fn draw_minimap(frame: &mut [u8], map: &Map, cam: &Camera, state: &StatePacket) 
         }}
     }
 
-    // player dots — 4×4 with bright centre + 5-pixel facing arrow for local player
     for p in &state.players {
         let px = MINI_X + p.x as usize * MINI_CELL;
         let py = MINI_Y + p.y as usize * MINI_CELL;
@@ -433,7 +513,6 @@ fn draw_minimap(frame: &mut [u8], map: &Map, cam: &Camera, state: &StatePacket) 
             }
         }}
 
-        // facing arrow — 5-pixel white line for local player
         if is_local {
             for t in 1..=5i32 {
                 let fx = px as f32 + cam.dir_x * t as f32;
@@ -468,7 +547,6 @@ fn draw_fuel_bar(frame: &mut [u8], fuel: f32) {
             let on_border = row < bar_y || row >= bar_y + bar_h
                          || col < bar_x || col >= bar_x + bar_w;
             if on_border {
-                // neon border matches fill colour
                 frame[idx] = fr / 2; frame[idx+1] = fg / 2; frame[idx+2] = fb / 2;
             } else if col < bar_x + fill {
                 frame[idx] = fr; frame[idx+1] = fg; frame[idx+2] = fb;
@@ -482,7 +560,7 @@ fn draw_fuel_bar(frame: &mut [u8], fuel: f32) {
 
 // Pass 6 — rescue flash: gold border that fades over 3 seconds
 fn draw_rescue_flash(frame: &mut [u8], t: f32) {
-    let intensity = 1.0 - t; // 1.0 at rescue, 0.0 at 3 seconds
+    let intensity = 1.0 - t;
     let r = (0xff as f32 * intensity) as u8;
     let g = (0xcc as f32 * intensity) as u8;
     let border = 10usize;
@@ -502,7 +580,7 @@ fn draw_rescue_flash(frame: &mut [u8], t: f32) {
     }
 }
 
-// Pass 7 — cinematic vignette (darkens corners, adds depth)
+// Pass 7 — cinematic vignette
 fn apply_vignette(frame: &mut [u8]) {
     let cx = WIDTH  as f32 / 2.0;
     let cy = HEIGHT as f32 / 2.0;
@@ -530,9 +608,9 @@ const DIGITS_3X5: [[u8; 5]; 10] = [
     [0b111, 0b100, 0b111, 0b101, 0b111],
     [0b111, 0b001, 0b001, 0b001, 0b001],
     [0b111, 0b101, 0b111, 0b101, 0b111],
-    [0b111, 0b101, 0b111, 0x001, 0b111],
+    [0b111, 0b101, 0b111, 0b001, 0b111],
 ];
-const SC: usize = 2; // scale factor
+const SC: usize = 2;
 const DW: usize = 3 * SC;
 const DH: usize = 5 * SC;
 const GAP: usize = 2;
@@ -563,90 +641,6 @@ fn draw_fps(frame: &mut [u8], fps: f32) {
                 }
             }
         }
-    }
-}
-
-// ── Movement prediction (mirrors server game_tick physics exactly) ────────────
-
-impl App {
-    fn apply_movement(&mut self) {
-        if self.input.turn_left.load(Ordering::Relaxed) {
-            let a = self.cam.dir_y.atan2(self.cam.dir_x) - PLAYER_TURN_SPEED;
-            self.cam.set_angle(a);
-        }
-        if self.input.turn_right.load(Ordering::Relaxed) {
-            let a = self.cam.dir_y.atan2(self.cam.dir_x) + PLAYER_TURN_SPEED;
-            self.cam.set_angle(a);
-        }
-        let mut nx = self.cam.x;
-        let mut ny = self.cam.y;
-        if self.input.forward.load(Ordering::Relaxed) {
-            nx += self.cam.dir_x * PLAYER_SPEED;
-            ny += self.cam.dir_y * PLAYER_SPEED;
-        }
-        if self.input.backward.load(Ordering::Relaxed) {
-            nx -= self.cam.dir_x * PLAYER_SPEED;
-            ny -= self.cam.dir_y * PLAYER_SPEED;
-        }
-        let ix = nx as i32; let iy = ny as i32;
-        if ix >= 0 && iy >= 0 && !self.map.is_wall(ix as usize, iy as usize) {
-            self.cam.x = nx; self.cam.y = ny;
-        }
-    }
-
-// ── Main render ───────────────────────────────────────────────────────────────
-
-    fn render(&mut self) {
-        let pixels = match &mut self.pixels { Some(p) => p, None => return };
-
-        // local camera driven by apply_movement — only read server state for HUD/others
-        if let Some(state) = &self.last_state {
-            if self.local_id.is_none() { self.local_id = Some(state.your_id); }
-            if state.miner_rescued && !self.miner_rescued {
-                self.miner_rescued = true;
-                self.rescue_flash  = Some(Instant::now());
-            }
-        }
-
-        let frame = pixels.frame_mut();
-
-        draw_background(frame);
-        cast_walls(frame, &self.cam, &self.map, &mut self.z_buf);
-
-        // collect sprites: other players (cyan) + miner (gold, if not rescued)
-        if let Some(state) = &self.last_state {
-            let mut sprites: Vec<(f32, f32, [u8; 3], bool)> = state.players.iter()
-                .filter(|p| Some(p.id) != self.local_id)
-                .map(|p| (p.x, p.y, [0x00u8, 0xffu8, 0xccu8], false))
-                .collect();
-
-            if !state.miner_rescued {
-                let (mx, my) = self.map.miner_pos;
-                sprites.push((mx, my, [0xff, 0xcc, 0x00], true));
-            }
-
-            draw_sprites(frame, &self.cam, &sprites, &self.z_buf);
-            apply_vignette(frame);
-            draw_minimap(frame, &self.map, &self.cam, state);
-
-            let fuel = state.players.iter()
-                .find(|p| Some(p.id) == self.local_id)
-                .map(|p| p.fuel)
-                .unwrap_or(100.0);
-            draw_fuel_bar(frame, fuel);
-        } else {
-            apply_vignette(frame);
-        }
-
-        if let Some(start) = self.rescue_flash {
-            let t = start.elapsed().as_secs_f32() / 3.0;
-            if t < 1.0 { draw_rescue_flash(frame, t); }
-            else { self.rescue_flash = None; }
-        }
-
-        draw_fps(frame, self.fps);
-
-        if let Err(e) = pixels.render() { eprintln!("render error: {e}"); }
     }
 }
 

@@ -24,11 +24,10 @@ const PLAYER_SPEED: f32 = 0.05;
 const PLAYER_TURN_SPEED: f32 = 0.04;
 const TIMEOUT_SECS: u64 = 10;
 const RATE_LIMIT_PER_SEC: u32 = 128;
-
 const FUEL_MAX: f32 = 100.0;
 // depletes over ~90 seconds at 62.5 ticks/sec
 const FUEL_DRAIN: f32 = FUEL_MAX / (90.0 * (1000.0 / TICK_MS as f32));
-const RESCUE_DIST: f32 = 0.8;  // world units — player must be this close to rescue
+const RESCUE_DIST: f32 = 0.8;
 const RESPAWN_SECS: u64 = 3;
 
 #[derive(Parser, Debug)]
@@ -64,24 +63,35 @@ struct Player {
 impl Player {
     fn spawn(id: u32, token: u64) -> Self {
         Self {
-            id, x: 1.5, y: 1.5, angle: 0.0,
-            fuel: FUEL_MAX, respawn_at: None,
+            id,
+            x: 1.5,
+            y: 1.5,
+            angle: 0.0,
+            fuel: FUEL_MAX,
+            respawn_at: None,
             session_token: token,
-            last_sequence: 0, last_seen: Instant::now(),
-            packet_count: 0, rate_window_start: Instant::now(),
-            input_forward: false, input_backward: false,
-            input_turn_left: false, input_turn_right: false,
+            last_sequence: 0,
+            last_seen: Instant::now(),
+            packet_count: 0,
+            rate_window_start: Instant::now(),
+            input_forward: false,
+            input_backward: false,
+            input_turn_left: false,
+            input_turn_right: false,
         }
     }
 
     fn respawn(&mut self) {
-        self.x = 1.5; self.y = 1.5; self.angle = 0.0;
-        self.fuel = FUEL_MAX; self.respawn_at = None;
+        self.x = 1.5;
+        self.y = 1.5;
+        self.angle = 0.0;
+        self.fuel = FUEL_MAX;
+        self.respawn_at = None;
     }
 }
 
-type Players     = Arc<Mutex<HashMap<SocketAddr, Player>>>;
-type MinerSaved  = Arc<AtomicBool>;
+type Players = Arc<Mutex<HashMap<SocketAddr, Player>>>;
+type MinerSaved = Arc<AtomicBool>;
 
 #[tokio::main]
 async fn main() {
@@ -93,14 +103,27 @@ async fn main() {
     tracing::info!("server listening on {}", addr);
 
     let map = Arc::new(get_level(args.level));
-    tracing::info!("loaded level {} — miner at ({:.1}, {:.1})", args.level, map.miner_pos.0, map.miner_pos.1);
+    tracing::info!(
+        "loaded level {} — miner at ({:.1}, {:.1})",
+        args.level,
+        map.miner_pos.0,
+        map.miner_pos.1
+    );
 
-    let players: Players   = Arc::new(Mutex::new(HashMap::new()));
+    let players: Players = Arc::new(Mutex::new(HashMap::new()));
     let miner_saved: MinerSaved = Arc::new(AtomicBool::new(false));
 
     let lh = tokio::spawn(udp_listener(Arc::clone(&socket), Arc::clone(&players)));
-    let th = tokio::spawn(game_tick(Arc::clone(&players), Arc::clone(&map), Arc::clone(&miner_saved)));
-    let bh = tokio::spawn(broadcast(Arc::clone(&socket), Arc::clone(&players), Arc::clone(&miner_saved)));
+    let th = tokio::spawn(game_tick(
+        Arc::clone(&players),
+        Arc::clone(&map),
+        Arc::clone(&miner_saved),
+    ));
+    let bh = tokio::spawn(broadcast(
+        Arc::clone(&socket),
+        Arc::clone(&players),
+        Arc::clone(&miner_saved),
+    ));
 
     let _ = tokio::try_join!(lh, th, bh);
 }
@@ -114,7 +137,10 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
     loop {
         let (len, src) = match socket.recv_from(&mut buf).await {
             Ok(v) => v,
-            Err(e) => { tracing::warn!("recv error: {e}"); continue; }
+            Err(e) => {
+                tracing::warn!("recv error: {e}");
+                continue;
+            }
         };
 
         if len > MAX_PACKET_BYTES {
@@ -124,7 +150,10 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
 
         let packet: InputPacket = match postcard::from_bytes(&buf[..len]) {
             Ok(p) => p,
-            Err(_) => { tracing::warn!("malformed packet from {src}"); continue; }
+            Err(_) => {
+                tracing::warn!("malformed packet from {src}");
+                continue;
+            }
         };
 
         let mut players = players.lock().await;
@@ -144,18 +173,23 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
             player.rate_window_start = now;
         }
         player.packet_count += 1;
-        if player.packet_count > RATE_LIMIT_PER_SEC { continue; }
+        if player.packet_count > RATE_LIMIT_PER_SEC {
+            continue;
+        }
 
         if packet.session_token != 0 && packet.session_token != player.session_token {
-            tracing::warn!("bad token from {src}"); continue;
+            tracing::warn!("bad token from {src}");
+            continue;
         }
-        if packet.sequence <= player.last_sequence { continue; }
+        if packet.sequence <= player.last_sequence {
+            continue;
+        }
 
         player.last_sequence = packet.sequence;
         player.last_seen = now;
-        player.input_forward   = packet.forward;
-        player.input_backward  = packet.backward;
-        player.input_turn_left  = packet.turn_left;
+        player.input_forward = packet.forward;
+        player.input_backward = packet.backward;
+        player.input_turn_left = packet.turn_left;
         player.input_turn_right = packet.turn_right;
     }
 }
@@ -173,7 +207,9 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>, miner_saved: Mi
         // drop timed-out players
         players.retain(|addr, p| {
             let alive = p.last_seen.elapsed().as_secs() < TIMEOUT_SECS;
-            if !alive { tracing::info!("player {} ({}) timed out", p.id, addr); }
+            if !alive {
+                tracing::info!("player {} ({}) timed out", p.id, addr);
+            }
             alive
         });
 
@@ -187,26 +223,43 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>, miner_saved: Mi
                 continue; // frozen until respawn
             }
 
-            // drain fuel
+            // drain fuel each tick
             player.fuel -= FUEL_DRAIN;
             if player.fuel <= 0.0 {
                 player.fuel = 0.0;
-                player.respawn_at = Some(Instant::now() + Duration::from_secs(RESPAWN_SECS));
-                tracing::info!("player {} out of fuel — respawn in {}s", player.id, RESPAWN_SECS);
+                player.respawn_at =
+                    Some(Instant::now() + Duration::from_secs(RESPAWN_SECS));
+                tracing::info!(
+                    "player {} out of fuel, respawn in {}s",
+                    player.id,
+                    RESPAWN_SECS
+                );
                 continue;
             }
 
             // movement + collision
-            let mut nx = player.x;
-            let mut ny = player.y;
-            if player.input_forward  { nx += player.angle.cos() * PLAYER_SPEED; ny += player.angle.sin() * PLAYER_SPEED; }
-            if player.input_backward { nx -= player.angle.cos() * PLAYER_SPEED; ny -= player.angle.sin() * PLAYER_SPEED; }
-            if player.input_turn_left  { player.angle -= PLAYER_TURN_SPEED; }
-            if player.input_turn_right { player.angle += PLAYER_TURN_SPEED; }
+            let mut new_x = player.x;
+            let mut new_y = player.y;
+            if player.input_forward {
+                new_x += player.angle.cos() * PLAYER_SPEED;
+                new_y += player.angle.sin() * PLAYER_SPEED;
+            }
+            if player.input_backward {
+                new_x -= player.angle.cos() * PLAYER_SPEED;
+                new_y -= player.angle.sin() * PLAYER_SPEED;
+            }
+            if player.input_turn_left {
+                player.angle -= PLAYER_TURN_SPEED;
+            }
+            if player.input_turn_right {
+                player.angle += PLAYER_TURN_SPEED;
+            }
 
-            let ix = nx as i32; let iy = ny as i32;
-            if ix >= 0 && iy >= 0 && !map.is_wall(ix as usize, iy as usize) {
-                player.x = nx; player.y = ny;
+            let nx = new_x as i32;
+            let ny = new_y as i32;
+            if nx >= 0 && ny >= 0 && !map.is_wall(nx as usize, ny as usize) {
+                player.x = new_x;
+                player.y = new_y;
             }
 
             // miner rescue proximity check
@@ -233,14 +286,24 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players, miner_saved: MinerS
         sequence = sequence.wrapping_add(1);
 
         let players = players.lock().await;
-        if players.is_empty() { continue; }
+        if players.is_empty() {
+            continue;
+        }
 
         let rescued = miner_saved.load(Ordering::Relaxed);
+        // build the player list once, reuse for every client
         let player_list: Vec<PlayerState> = players
             .values()
-            .map(|p| PlayerState { id: p.id, x: p.x, y: p.y, angle: p.angle, fuel: p.fuel })
+            .map(|p| PlayerState {
+                id: p.id,
+                x: p.x,
+                y: p.y,
+                angle: p.angle,
+                fuel: p.fuel,
+            })
             .collect();
 
+        // send each client a StatePacket with their own your_id set
         for (addr, player) in players.iter() {
             let state = StatePacket {
                 sequence,
@@ -250,7 +313,10 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players, miner_saved: MinerS
             };
             let encoded = match postcard::to_allocvec(&state) {
                 Ok(b) => b,
-                Err(e) => { tracing::error!("serialize error: {e}"); continue; }
+                Err(e) => {
+                    tracing::error!("serialize error: {e}");
+                    continue;
+                }
             };
             if let Err(e) = socket.send_to(&encoded, addr).await {
                 tracing::warn!("send error to {addr}: {e}");

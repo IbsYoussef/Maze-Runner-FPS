@@ -35,5 +35,5 @@ pub struct PlayerState {
     pub x: f32,
     pub y: f32,
     pub angle: f32,
-    pub fuel: f32, // 0.0–100.0
+    pub fuel: f32,
 }
