@@ -175,6 +175,14 @@ impl App {
 
         if let Err(e) = pixels.render() {
             eprintln!("render error: {e}");
+            // request a resize to recover the surface
+            if let Some(w) = &self.window {
+                let size = w.inner_size();
+                let _ = self
+                    .pixels
+                    .as_mut()
+                    .map(|p| p.resize_surface(size.width, size.height));
+            }
         }
     }
 }
@@ -205,6 +213,11 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => {
+                if let Some(pixels) = &mut self.pixels {
+                    let _ = pixels.resize_surface(size.width, size.height);
+                }
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
