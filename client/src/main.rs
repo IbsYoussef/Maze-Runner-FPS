@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+use winit::event::DeviceEvent;
+use winit::window::CursorGrabMode;
 
 use clap::Parser;
 use pixels::{Pixels, SurfaceTexture};
@@ -31,6 +33,7 @@ const FOV_PLANE: f32 = 0.66;
 const PLAYER_SPEED: f32 = 0.05;
 const PLAYER_TURN_SPEED: f32 = 0.04;
 const MOVE_TICK: Duration = Duration::from_millis(16);
+const MOUSE_SENSITIVITY: f32 = 0.002;
 
 // mini-map config
 const MINI_CELL: usize = 4;
@@ -114,6 +117,7 @@ struct App {
     fps_count: u32,
     fps: f32,
     move_timer: Instant,
+    mouse_captured: bool,
 }
 
 impl App {
@@ -241,7 +245,17 @@ impl ApplicationHandler for App {
                     KeyCode::KeyD | KeyCode::ArrowRight => {
                         self.input.turn_right.store(pressed, Ordering::Relaxed)
                     }
-                    KeyCode::Escape => event_loop.exit(),
+                    KeyCode::Escape => {
+                        if self.mouse_captured {
+                            if let Some(w) = &self.window {
+                                let _ = w.set_cursor_grab(CursorGrabMode::None);
+                                w.set_cursor_visible(true);
+                                self.mouse_captured = false;
+                            }
+                        } else {
+                            event_loop.exit();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -271,6 +285,24 @@ impl ApplicationHandler for App {
                     w.request_redraw();
                 }
             }
+            // capture mouse on click
+            WindowEvent::MouseInput { state, .. } => {
+                if state == ElementState::Pressed && !self.mouse_captured {
+                    if let Some(w) = &self.window {
+                        let _ = w.set_cursor_grab(CursorGrabMode::Confined);
+                        w.set_cursor_visible(false);
+                        self.mouse_captured = true;
+                    }
+                }
+            }
+            // release mouse on escape (already exits but add ungrab)
+            WindowEvent::Focused(false) => {
+                if let Some(w) = &self.window {
+                    let _ = w.set_cursor_grab(CursorGrabMode::None);
+                    w.set_cursor_visible(true);
+                    self.mouse_captured = false;
+                }
+            }
             _ => {}
         }
     }
@@ -279,6 +311,21 @@ impl ApplicationHandler for App {
         event_loop.set_control_flow(ControlFlow::Poll);
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        if !self.mouse_captured {
+            return;
+        }
+        if let DeviceEvent::MouseMotion { delta: (dx, _) } = event {
+            let a = self.cam.dir_y.atan2(self.cam.dir_x) + dx as f32 * MOUSE_SENSITIVITY;
+            self.cam.set_angle(a);
         }
     }
 }
@@ -632,6 +679,7 @@ fn main() {
         fps_count: 0,
         fps: 0.0,
         move_timer: Instant::now(),
+        mouse_captured: false,
     };
     event_loop.run_app(&mut app).expect("event loop error");
 }
