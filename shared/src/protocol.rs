@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_PACKET_BYTES: usize = 256;
+pub const KILL_LIMIT: u32 = 10;
 
 // Client → Server
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -18,6 +19,7 @@ pub struct InputPacket {
     pub backward: bool,
     pub turn_left: bool,
     pub turn_right: bool,
+    pub shoot: bool,
 }
 
 // Server → Client
@@ -26,6 +28,8 @@ pub struct StatePacket {
     pub sequence: u32,
     pub your_id: u32,
     pub players: Vec<PlayerState>,
+    pub match_over: bool,
+    pub winner_id: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -35,4 +39,5 @@ pub struct PlayerState {
     pub y: f32,
     pub angle: f32,
     pub fuel: f32,
+    pub kills: u32,
 }
