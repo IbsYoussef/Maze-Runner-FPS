@@ -22,7 +22,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use shared::map::Map;
-use shared::protocol::{InputPacket, MAX_PACKET_BYTES, StatePacket};
+use shared::protocol::{InputPacket, KILL_LIMIT, MAX_PACKET_BYTES, StatePacket};
 
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
@@ -58,6 +58,7 @@ struct InputFlags {
     backward: AtomicBool,
     turn_left: AtomicBool,
     turn_right: AtomicBool,
+    shoot: AtomicBool,
 }
 
 impl InputFlags {
@@ -67,6 +68,7 @@ impl InputFlags {
             backward: AtomicBool::new(false),
             turn_left: AtomicBool::new(false),
             turn_right: AtomicBool::new(false),
+            shoot: AtomicBool::new(false),
         }
     }
 }
@@ -118,6 +120,68 @@ struct App {
     fps: f32,
     move_timer: Instant,
     mouse_captured: bool,
+}
+
+fn draw_win_screen(frame: &mut [u8], winner_id: u32, your_id: u32) {
+    // darken the whole frame
+    for px in frame.chunks_exact_mut(4) {
+        px[0] = (px[0] as u32 / 3) as u8;
+        px[1] = (px[1] as u32 / 3) as u8;
+        px[2] = (px[2] as u32 / 3) as u8;
+    }
+
+    // draw a bright centre bar
+    let mid_y = HEIGHT as usize / 2;
+    let (r, g, b) = if winner_id == your_id {
+        (0x00u8, 0xffu8, 0x44u8)
+    } else {
+        (0xffu8, 0x22u8, 0x22u8)
+    };
+    for dy in 0..20 {
+        for dx in 100..WIDTH as usize - 100 {
+            let idx = ((mid_y - 10 + dy) * WIDTH as usize + dx) * 4;
+            if idx + 3 < frame.len() {
+                frame[idx] = r;
+                frame[idx + 1] = g;
+                frame[idx + 2] = b;
+                frame[idx + 3] = 0xff;
+            }
+        }
+    }
+}
+
+fn draw_scoreboard(frame: &mut [u8], state: &StatePacket) {
+    let x = 8usize;
+    let mut y = HEIGHT as usize - 8 - state.players.len() * 10;
+
+    for p in &state.players {
+        let is_local = p.id == state.your_id;
+        let (r, g, b) = if is_local {
+            (0x00u8, 0xffu8, 0xffu8)
+        } else {
+            (0xffu8, 0xffu8, 0xffu8)
+        };
+
+        // draw a small coloured bar showing kills out of KILL_LIMIT
+        let bar_w = (p.kills as usize * 60) / KILL_LIMIT as usize;
+        for dy in 0..6 {
+            for dx in 0..60 {
+                let idx = ((y + dy) * WIDTH as usize + x + dx) * 4;
+                if idx + 3 < frame.len() {
+                    let (pr, pg, pb) = if dx < bar_w {
+                        (r, g, b)
+                    } else {
+                        (0x22u8, 0x22u8, 0x22u8)
+                    };
+                    frame[idx] = pr;
+                    frame[idx + 1] = pg;
+                    frame[idx + 2] = pb;
+                    frame[idx + 3] = 0xff;
+                }
+            }
+        }
+        y += 10;
+    }
 }
 
 impl App {
@@ -176,6 +240,13 @@ impl App {
         }
 
         draw_fps(frame, self.fps);
+
+        if let Some(state) = &self.last_state {
+            draw_scoreboard(frame, state);
+            if state.match_over {
+                draw_win_screen(frame, state.winner_id, state.your_id);
+            }
+        }
 
         if let Err(e) = pixels.render() {
             eprintln!("render error: {e}");
@@ -286,12 +357,21 @@ impl ApplicationHandler for App {
                 }
             }
             // capture mouse on click
-            WindowEvent::MouseInput { state, .. } => {
-                if state == ElementState::Pressed && !self.mouse_captured {
-                    if let Some(w) = &self.window {
-                        let _ = w.set_cursor_grab(CursorGrabMode::Confined);
-                        w.set_cursor_visible(false);
-                        self.mouse_captured = true;
+            WindowEvent::MouseInput { state, button, .. } => {
+                use winit::event::MouseButton;
+                if button == MouseButton::Left {
+                    if !self.mouse_captured {
+                        // first click captures the mouse
+                        if let Some(w) = &self.window {
+                            let _ = w.set_cursor_grab(CursorGrabMode::Confined);
+                            w.set_cursor_visible(false);
+                            self.mouse_captured = true;
+                        }
+                    } else {
+                        // subsequent clicks shoot
+                        self.input
+                            .shoot
+                            .store(state == ElementState::Pressed, Ordering::Relaxed);
                     }
                 }
             }
@@ -635,6 +715,7 @@ fn net_thread(
             backward: input.backward.load(Ordering::Relaxed),
             turn_left: input.turn_left.load(Ordering::Relaxed),
             turn_right: input.turn_right.load(Ordering::Relaxed),
+            shoot: input.shoot.load(Ordering::Relaxed),
         };
         if let Ok(enc) = postcard::to_allocvec(&pkt) {
             let _ = socket.send(&enc);

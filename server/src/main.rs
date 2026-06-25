@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio::time;
 
 use shared::map::get_level;
-use shared::protocol::{InputPacket, MAX_PACKET_BYTES, PlayerState, StatePacket};
+use shared::protocol::{InputPacket, KILL_LIMIT, MAX_PACKET_BYTES, PlayerState, StatePacket};
 
 use clap::Parser;
 
@@ -27,6 +27,9 @@ const FUEL_MAX: f32 = 100.0;
 // depletes over ~90s at 62.5 ticks/sec
 const FUEL_DRAIN: f32 = FUEL_MAX / (90.0 * (1000.0 / TICK_MS as f32));
 const RESPAWN_SECS: u64 = 3;
+
+const SHOOT_RANGE: f32 = 10.0;
+const SHOOT_WIDTH: f32 = 0.3;
 
 #[derive(Parser, Debug)]
 #[command(name = "maze-wars-server")]
@@ -47,6 +50,7 @@ struct Player {
     y: f32,
     angle: f32,
     fuel: f32,
+    kills: u32,
     respawn_at: Option<Instant>,
     session_token: u64,
     last_sequence: u32,
@@ -59,6 +63,8 @@ struct Player {
     input_backward: bool,
     input_turn_left: bool,
     input_turn_right: bool,
+    input_shoot: bool,
+    just_shot: bool,
 }
 
 impl Player {
@@ -69,6 +75,7 @@ impl Player {
             y: 1.5,
             angle: 0.0,
             fuel: FUEL_MAX,
+            kills: 0,
             respawn_at: None,
             session_token: token,
             last_sequence: 0,
@@ -79,6 +86,8 @@ impl Player {
             input_backward: false,
             input_turn_left: false,
             input_turn_right: false,
+            input_shoot: false,
+            just_shot: false,
         }
     }
 
@@ -189,6 +198,7 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
         player.input_backward = packet.backward;
         player.input_turn_left = packet.turn_left;
         player.input_turn_right = packet.turn_right;
+        player.input_shoot = packet.shoot;
     }
 }
 
@@ -208,18 +218,91 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
             alive
         });
 
-        // apply movement and collision detection for each player
+        // collect shooter data before mutably iterating
+        let shooter_data: Vec<(u32, f32, f32, f32, bool)> = players
+            .values()
+            .map(|p| (p.id, p.x, p.y, p.angle, p.input_shoot && !p.just_shot))
+            .collect();
+
+        // resolve shots — find hit player ids
+        let mut hits: Vec<(u32, u32)> = Vec::new(); // (shooter_id, victim_id)
+        for (shooter_id, sx, sy, angle, shooting) in &shooter_data {
+            if !shooting {
+                continue;
+            }
+            for (target_id, tx, ty, _, _) in &shooter_data {
+                if shooter_id == target_id {
+                    continue;
+                }
+                // step ray forward from shooter
+                let mut hit = false;
+                let mut rx = *sx;
+                let mut ry = *sy;
+                let dx = angle.cos();
+                let dy = angle.sin();
+                let steps = (SHOOT_RANGE / 0.05) as u32;
+                for _ in 0..steps {
+                    rx += dx * 0.05;
+                    ry += dy * 0.05;
+                    let ix = rx as i32;
+                    let iy = ry as i32;
+                    if ix < 0 || iy < 0 || map.is_wall(ix as usize, iy as usize) {
+                        break;
+                    }
+                    let dist = ((rx - tx).powi(2) + (ry - ty).powi(2)).sqrt();
+                    if dist < SHOOT_WIDTH {
+                        hit = true;
+                        break;
+                    }
+                }
+                if hit {
+                    hits.push((*shooter_id, *target_id));
+                    tracing::info!("player {} hit player {}", shooter_id, target_id);
+                    break; // one hit per shot
+                }
+            }
+        }
+
+        // apply hits
+        let mut winner_id: Option<u32> = None;
+        for (shooter_id, victim_id) in hits {
+            // give shooter a kill
+            if let Some(shooter) = players.values_mut().find(|p| p.id == shooter_id) {
+                shooter.kills += 1;
+                tracing::info!("player {} kills: {}", shooter_id, shooter.kills);
+                if shooter.kills >= KILL_LIMIT {
+                    winner_id = Some(shooter_id);
+                }
+            }
+            // respawn victim
+            if let Some(victim) = players.values_mut().find(|p| p.id == victim_id) {
+                victim.respawn_at = Some(Instant::now() + Duration::from_secs(RESPAWN_SECS));
+                tracing::info!("player {} was shot, respawning", victim_id);
+            }
+        }
+
+        // reset match if someone won
+        if let Some(winner) = winner_id {
+            tracing::info!("player {} wins the match!", winner);
+            for player in players.values_mut() {
+                player.kills = 0;
+                player.respawn();
+            }
+        }
+
+        // apply movement
         for player in players.values_mut() {
-            // handler pending respawn
+            // update just_shot flag
+            player.just_shot = player.input_shoot;
+
             if let Some(at) = player.respawn_at {
                 if Instant::now() >= at {
                     tracing::info!("player {} respawning", player.id);
                     player.respawn();
                 }
-                continue; // frozen until respawn completes
+                continue;
             }
 
-            // drain fuel each tick
             player.fuel -= FUEL_DRAIN;
             if player.fuel <= 0.0 {
                 player.fuel = 0.0;
@@ -232,7 +315,6 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
                 continue;
             }
 
-            // movement + collision
             let mut new_x = player.x;
             let mut new_y = player.y;
             if player.input_forward {
@@ -283,8 +365,14 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
                 y: p.y,
                 angle: p.angle,
                 fuel: p.fuel,
+                kills: p.kills,
             })
             .collect();
+
+        // check for winner
+        let winner = player_list.iter().find(|p| p.kills >= KILL_LIMIT);
+        let match_over = winner.is_some();
+        let winner_id = winner.map(|p| p.id).unwrap_or(0);
 
         // send each client a StatePacket with their own your_id set
         for (addr, player) in players.iter() {
@@ -292,7 +380,10 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
                 sequence,
                 your_id: player.id,
                 players: player_list.clone(),
+                match_over,
+                winner_id,
             };
+
             let encoded = match postcard::to_allocvec(&state) {
                 Ok(b) => b,
                 Err(e) => {
