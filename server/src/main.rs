@@ -20,7 +20,6 @@ use clap::Parser;
 
 const TICK_MS: u64 = 16;
 const PLAYER_SPEED: f32 = 0.05;
-const PLAYER_TURN_SPEED: f32 = 0.04;
 const TIMEOUT_SECS: u64 = 10;
 const RATE_LIMIT_PER_SEC: u32 = 128;
 const FUEL_MAX: f32 = 100.0;
@@ -199,6 +198,7 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
         player.input_turn_left = packet.turn_left;
         player.input_turn_right = packet.turn_right;
         player.input_shoot = packet.shoot;
+        player.angle = packet.angle; // client-authoritative view angle
     }
 }
 
@@ -324,12 +324,6 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
             if player.input_backward {
                 new_x -= player.angle.cos() * PLAYER_SPEED;
                 new_y -= player.angle.sin() * PLAYER_SPEED;
-            }
-            if player.input_turn_left {
-                player.angle -= PLAYER_TURN_SPEED;
-            }
-            if player.input_turn_right {
-                player.angle += PLAYER_TURN_SPEED;
             }
 
             let nx = new_x as i32;
