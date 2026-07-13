@@ -1,11 +1,84 @@
 use macroquad::prelude::*;
 use shared::map::{Map, get_level};
+use shared::protocol::{InputPacket, MAX_PACKET_BYTES, StatePacket};
+
+use std::net::UdpSocket;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 // world constants, one grid cell = one world unit
 const WALL_HEIGHT: f32 = 1.0;
 const EYE_HEIGHT: f32 = 0.5; // camera height off the floor
 const MOVE_SPEED: f32 = 3.0; // world units per second
 const MOUSE_SENSITIVITY: f32 = 1.5;
+const KEY_TURN_SPEED: f32 = 2.5; // radians per second
+const NET_HZ: u64 = 60;
+
+// input state shared between game loop (writer) and net thread (reader)
+struct NetInput {
+    forward: AtomicBool,
+    backward: AtomicBool,
+    shoot: AtomicBool,
+    angle_bits: AtomicU32, // f32 yaw stored as raw bits (std has no AtomicF32)
+}
+
+impl NetInput {
+    fn new() -> Self {
+        Self {
+            forward: AtomicBool::new(false),
+            backward: AtomicBool::new(false),
+            shoot: AtomicBool::new(false),
+            angle_bits: AtomicU32::new(0f32.to_bits()),
+        }
+    }
+}
+
+fn net_thread(server_addr: String, input: Arc<NetInput>, state_tx: mpsc::SyncSender<StatePacket>) {
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("bind failed");
+    socket.connect(&server_addr).expect("connect failed");
+    socket
+        .set_read_timeout(Some(Duration::from_millis(1)))
+        .unwrap();
+    println!("net thread connected to {server_addr}");
+
+    let interval = Duration::from_millis(1000 / NET_HZ);
+    let mut seq = 0u32;
+    let mut buf = vec![0u8; MAX_PACKET_BYTES];
+
+    loop {
+        let t0 = Instant::now();
+        seq += 1;
+
+        let pkt = InputPacket {
+            sequence: seq,
+            player_id: 0,
+            session_token: 0,
+            forward: input.forward.load(Ordering::Relaxed),
+            backward: input.backward.load(Ordering::Relaxed),
+            turn_left: false, // legacy fields — angle now carries turning
+            turn_right: false,
+            shoot: input.shoot.load(Ordering::Relaxed),
+            angle: f32::from_bits(input.angle_bits.load(Ordering::Relaxed)),
+        };
+        if let Ok(enc) = postcard::to_allocvec(&pkt) {
+            let _ = socket.send(&enc);
+        }
+
+        if let Ok(len) = socket.recv(&mut buf) {
+            if let Ok(state) = postcard::from_bytes::<StatePacket>(&buf[..len]) {
+                let _ = state_tx.try_send(state);
+            }
+        }
+
+        let elapsed = t0.elapsed();
+        if elapsed < interval {
+            thread::sleep(interval - elapsed);
+        }
+    }
+}
 
 struct LocalPlayer {
     x: f32,
@@ -21,8 +94,8 @@ impl LocalPlayer {
     fn update(&mut self, map: &Map, dt: f32, look_dx: f32) {
         // --- mouse look: all turning comes from the mouse ---
         self.yaw += look_dx * MOUSE_SENSITIVITY;
+
         // keyboard turning fallback — works in WSLg where raw mouse motion doesn't
-        const KEY_TURN_SPEED: f32 = 2.5; // radians per second
         if is_key_down(KeyCode::Left) {
             self.yaw += KEY_TURN_SPEED * dt;
         }
@@ -109,9 +182,21 @@ async fn main() {
         yaw: 0.0,
     };
 
+    // networking: shared input + state channel, net thread in background
+    let input = Arc::new(NetInput::new());
+    let (state_tx, state_rx) = mpsc::sync_channel::<StatePacket>(1);
+    {
+        let input = Arc::clone(&input);
+        thread::spawn(move || net_thread("127.0.0.1:34254".into(), input, state_tx));
+    }
+    let mut last_state: Option<StatePacket> = None;
+
     let mut grabbed = true;
     set_cursor_grab(true); // lock the mouse to the window
     show_mouse(false);
+
+    let mut fps_display = 0;
+    let mut fps_timer = 0.0f32;
 
     loop {
         let dt = get_frame_time();
@@ -129,14 +214,34 @@ async fn main() {
             show_mouse(false);
         }
 
-        // manual mouse delta — robust where mouse_delta_position() misbehaves
+        // mouse look delta — mouse_delta_position() handles cursor-grab warping;
+        // the spike filter discards implausible jumps (e.g. the initial grab warp)
         let raw = mouse_delta_position();
         let look_dx = if grabbed && raw.x.abs() < 0.2 {
             -raw.x
         } else {
             0.0
         };
+
         player.update(&map, dt, look_dx);
+
+        // publish inputs for the net thread (after update so angle is current)
+        input.forward.store(
+            is_key_down(KeyCode::W) || is_key_down(KeyCode::Up),
+            Ordering::Relaxed,
+        );
+        input.backward.store(
+            is_key_down(KeyCode::S) || is_key_down(KeyCode::Down),
+            Ordering::Relaxed,
+        );
+        input
+            .angle_bits
+            .store(player.yaw.to_bits(), Ordering::Relaxed);
+
+        // drain incoming state — keep only the newest
+        while let Ok(s) = state_rx.try_recv() {
+            last_state = Some(s);
+        }
 
         clear_background(BLACK);
 
@@ -144,7 +249,13 @@ async fn main() {
         draw_maze(&map);
 
         set_default_camera();
-        let fps_text = format!("FPS: {}", get_fps());
+        // FPS display: sample twice a second so the number doesn't flicker
+        fps_timer += dt;
+        if fps_timer >= 0.5 {
+            fps_display = get_fps();
+            fps_timer = 0.0;
+        }
+        let fps_text = format!("FPS: {}", fps_display);
         draw_text(&fps_text, screen_width() - 100.0, 30.0, 24.0, YELLOW);
 
         next_frame().await
