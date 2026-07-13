@@ -172,6 +172,21 @@ fn draw_maze(map: &Map) {
     }
 }
 
+fn draw_players(state: &StatePacket) {
+    for p in &state.players {
+        if p.id == state.your_id {
+            continue;
+        }
+        // server (x, y) is our world (x, z); server angle unused for now
+        draw_cube(
+            vec3(p.x, 0.4, p.y), // slightly lower than walls
+            vec3(0.5, 0.8, 0.5), // slimmer than a wall cube, reads as a figure
+            None,
+            SKYBLUE,
+        );
+    }
+}
+
 #[macroquad::main("Maze Runner FPS")]
 async fn main() {
     // load level once, outside the loop
@@ -197,6 +212,8 @@ async fn main() {
 
     let mut fps_display = 0;
     let mut fps_timer = 0.0f32;
+
+    let mut spawned = false;
 
     loop {
         let dt = get_frame_time();
@@ -243,10 +260,25 @@ async fn main() {
             last_state = Some(s);
         }
 
+        // one-time: snap to our server-assigned spawn point
+        if !spawned {
+            if let Some(state) = &last_state {
+                if let Some(me) = state.players.iter().find(|p| p.id == state.your_id) {
+                    player.x = me.x;
+                    player.z = me.y; // server y == world z
+                    spawned = true;
+                }
+            }
+        }
+
         clear_background(BLACK);
 
         set_camera(&player.camera());
         draw_maze(&map);
+
+        if let Some(state) = &last_state {
+            draw_players(state);
+        }
 
         set_default_camera();
         // FPS display: sample twice a second so the number doesn't flicker

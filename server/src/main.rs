@@ -317,13 +317,15 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
 
             let mut new_x = player.x;
             let mut new_y = player.y;
+
             if player.input_forward {
-                new_x += player.angle.cos() * PLAYER_SPEED;
-                new_y += player.angle.sin() * PLAYER_SPEED;
+                new_x += player.angle.sin() * PLAYER_SPEED;
+                new_y += player.angle.cos() * PLAYER_SPEED;
             }
+
             if player.input_backward {
-                new_x -= player.angle.cos() * PLAYER_SPEED;
-                new_y -= player.angle.sin() * PLAYER_SPEED;
+                new_x -= player.angle.sin() * PLAYER_SPEED;
+                new_y -= player.angle.cos() * PLAYER_SPEED;
             }
 
             let nx = new_x as i32;
