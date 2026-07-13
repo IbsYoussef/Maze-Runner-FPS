@@ -20,6 +20,7 @@ pub struct InputPacket {
     pub turn_left: bool,
     pub turn_right: bool,
     pub shoot: bool,
+    pub angle: f32,
 }
 
 // Server → Client
