@@ -21,6 +21,8 @@ pub struct InputPacket {
     pub turn_right: bool,
     pub shoot: bool,
     pub angle: f32,
+    pub x: f32, // client-authoritative position
+    pub y: f32, // (server "y" == client world z)
 }
 
 // Server → Client

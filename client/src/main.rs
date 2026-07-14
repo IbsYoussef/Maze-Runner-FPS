@@ -23,6 +23,8 @@ struct NetInput {
     backward: AtomicBool,
     shoot: AtomicBool,
     angle_bits: AtomicU32, // f32 yaw stored as raw bits (std has no AtomicF32)
+    x_bits: AtomicU32,
+    y_bits: AtomicU32,
 }
 
 impl NetInput {
@@ -32,6 +34,8 @@ impl NetInput {
             backward: AtomicBool::new(false),
             shoot: AtomicBool::new(false),
             angle_bits: AtomicU32::new(0f32.to_bits()),
+            x_bits: AtomicU32::new(0f32.to_bits()),
+            y_bits: AtomicU32::new(0f32.to_bits()),
         }
     }
 }
@@ -62,15 +66,23 @@ fn net_thread(server_addr: String, input: Arc<NetInput>, state_tx: mpsc::SyncSen
             turn_right: false,
             shoot: input.shoot.load(Ordering::Relaxed),
             angle: f32::from_bits(input.angle_bits.load(Ordering::Relaxed)),
+            x: f32::from_bits(input.x_bits.load(Ordering::Relaxed)),
+            y: f32::from_bits(input.y_bits.load(Ordering::Relaxed)),
         };
         if let Ok(enc) = postcard::to_allocvec(&pkt) {
             let _ = socket.send(&enc);
         }
 
-        if let Ok(len) = socket.recv(&mut buf) {
+        // drain ALL queued packets, forward only the newest —
+        // otherwise a backlog builds in the OS buffer and latency grows forever
+        let mut newest: Option<StatePacket> = None;
+        while let Ok(len) = socket.recv(&mut buf) {
             if let Ok(state) = postcard::from_bytes::<StatePacket>(&buf[..len]) {
-                let _ = state_tx.try_send(state);
+                newest = Some(state);
             }
+        }
+        if let Some(state) = newest {
+            let _ = state_tx.try_send(state);
         }
 
         let elapsed = t0.elapsed();
@@ -187,6 +199,45 @@ fn draw_players(state: &StatePacket) {
     }
 }
 
+fn draw_minimap(map: &Map, player: &LocalPlayer, state: &Option<StatePacket>) {
+    const SCALE: f32 = 6.0; // pixels per map cell
+    const MARGIN: f32 = 12.0;
+    let size = map.width as f32 * SCALE;
+    let ox = screen_width() - size - MARGIN; // origin x (bottom-right corner)
+    let oy = screen_height() - size - MARGIN; // origin y
+
+    // layer 1: tiles
+    for gy in 0..map.height {
+        for gx in 0..map.width {
+            let color = if map.is_wall(gx, gy) {
+                LIGHTGRAY
+            } else {
+                Color::new(0.1, 0.1, 0.1, 0.8) // semi-transparent dark
+            };
+            draw_rectangle(
+                ox + gx as f32 * SCALE,
+                oy + gy as f32 * SCALE,
+                SCALE,
+                SCALE,
+                color,
+            );
+        }
+    }
+
+    // layer 2: Other players (from server state)
+    if let Some(state) = state {
+        for p in &state.players {
+            if p.id == state.your_id {
+                continue;
+            }
+            draw_circle(ox + p.x * SCALE, oy + p.y * SCALE, 2.5, SKYBLUE);
+        }
+    }
+
+    // layer 3: you (local position, matches camerae position)
+    draw_circle(ox + player.x * SCALE, oy + player.z * SCALE, 2.5, YELLOW);
+}
+
 #[macroquad::main("Maze Runner FPS")]
 async fn main() {
     // load level once, outside the loop
@@ -206,9 +257,7 @@ async fn main() {
     }
     let mut last_state: Option<StatePacket> = None;
 
-    let mut grabbed = true;
-    set_cursor_grab(true); // lock the mouse to the window
-    show_mouse(false);
+    let mut grabbed = false; // start free — click a window to capture (Escape to release)
 
     let mut fps_display = 0;
     let mut fps_timer = 0.0f32;
@@ -254,6 +303,8 @@ async fn main() {
         input
             .angle_bits
             .store(player.yaw.to_bits(), Ordering::Relaxed);
+        input.x_bits.store(player.x.to_bits(), Ordering::Relaxed);
+        input.y_bits.store(player.z.to_bits(), Ordering::Relaxed);
 
         // drain incoming state — keep only the newest
         while let Ok(s) = state_rx.try_recv() {
@@ -289,6 +340,12 @@ async fn main() {
         }
         let fps_text = format!("FPS: {}", fps_display);
         draw_text(&fps_text, screen_width() - 100.0, 30.0, 24.0, YELLOW);
+        draw_minimap(&map, &player, &last_state);
+
+        // who am I? (server-assigned id, once known)
+        if let Some(state) = &last_state {
+            draw_text(&format!("P{}", state.your_id), 12.0, 30.0, 24.0, YELLOW);
+        }
 
         next_frame().await
     }

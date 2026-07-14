@@ -120,7 +120,11 @@ async fn main() {
     let players: Players = Arc::new(Mutex::new(HashMap::new()));
 
     // spawn the three tasks
-    let listener_handle = tokio::spawn(udp_listener(Arc::clone(&socket), Arc::clone(&players)));
+    let listener_handle = tokio::spawn(udp_listener(
+        Arc::clone(&socket),
+        Arc::clone(&players),
+        Arc::clone(&map),
+    ));
     let tick_handle = tokio::spawn(game_tick(Arc::clone(&players), Arc::clone(&map)));
     let broadcast_handle = tokio::spawn(broadcast(Arc::clone(&socket), Arc::clone(&players)));
 
@@ -128,7 +132,7 @@ async fn main() {
 }
 
 // UDP listener task — receives InputPackets, registers new players, stores input flags
-async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
+async fn udp_listener(socket: Arc<UdpSocket>, players: Players, map: Arc<shared::map::Map>) {
     let mut buf = vec![0u8; MAX_PACKET_BYTES];
     let mut next_id: u32 = 1;
 
@@ -199,6 +203,14 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players) {
         player.input_turn_right = packet.turn_right;
         player.input_shoot = packet.shoot;
         player.angle = packet.angle; // client-authoritative view angle
+
+        // client-authoritative position (reject positions inside walls)
+        let px = packet.x as i32;
+        let py = packet.y as i32;
+        if px >= 0 && py >= 0 && !map.is_wall(px as usize, py as usize) {
+            player.x = packet.x;
+            player.y = packet.y;
+        }
     }
 }
 
