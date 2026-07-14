@@ -43,4 +43,5 @@ pub struct PlayerState {
     pub angle: f32,
     pub fuel: f32,
     pub kills: u32,
+    pub respawning: bool, // true while dead & waiting to respawn
 }

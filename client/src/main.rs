@@ -25,6 +25,7 @@ struct NetInput {
     angle_bits: AtomicU32, // f32 yaw stored as raw bits (std has no AtomicF32)
     x_bits: AtomicU32,
     y_bits: AtomicU32,
+    spawned: AtomicBool,
 }
 
 impl NetInput {
@@ -36,6 +37,7 @@ impl NetInput {
             angle_bits: AtomicU32::new(0f32.to_bits()),
             x_bits: AtomicU32::new(0f32.to_bits()),
             y_bits: AtomicU32::new(0f32.to_bits()),
+            spawned: AtomicBool::new(false),
         }
     }
 }
@@ -66,8 +68,18 @@ fn net_thread(server_addr: String, input: Arc<NetInput>, state_tx: mpsc::SyncSen
             turn_right: false,
             shoot: input.shoot.load(Ordering::Relaxed),
             angle: f32::from_bits(input.angle_bits.load(Ordering::Relaxed)),
-            x: f32::from_bits(input.x_bits.load(Ordering::Relaxed)),
-            y: f32::from_bits(input.y_bits.load(Ordering::Relaxed)),
+            // don't claim a position until we've adopted our server spawn —
+            // the server rejects negatives, so it keeps its assigned corner
+            x: if input.spawned.load(Ordering::Relaxed) {
+                f32::from_bits(input.x_bits.load(Ordering::Relaxed))
+            } else {
+                -1.0
+            },
+            y: if input.spawned.load(Ordering::Relaxed) {
+                f32::from_bits(input.y_bits.load(Ordering::Relaxed))
+            } else {
+                -1.0
+            },
         };
         if let Ok(enc) = postcard::to_allocvec(&pkt) {
             let _ = socket.send(&enc);
@@ -186,7 +198,7 @@ fn draw_maze(map: &Map) {
 
 fn draw_players(state: &StatePacket) {
     for p in &state.players {
-        if p.id == state.your_id {
+        if p.id == state.your_id || p.respawning {
             continue;
         }
         // server (x, y) is our world (x, z); server angle unused for now
@@ -280,6 +292,12 @@ async fn main() {
             show_mouse(false);
         }
 
+        // shoot: right button while mouse is captured (left is for window grab)
+        input.shoot.store(
+            grabbed && is_mouse_button_down(MouseButton::Right),
+            Ordering::Relaxed,
+        );
+
         // mouse look delta — mouse_delta_position() handles cursor-grab warping;
         // the spike filter discards implausible jumps (e.g. the initial grab warp)
         let raw = mouse_delta_position();
@@ -311,13 +329,28 @@ async fn main() {
             last_state = Some(s);
         }
 
+        // if WE are respawning, the server owns our position — snap to it
+        let mut respawning = false;
+        if let Some(state) = &last_state {
+            if let Some(me) = state.players.iter().find(|p| p.id == state.your_id) {
+                if me.respawning {
+                    respawning = true;
+                    player.x = me.x;
+                    player.z = me.y;
+                    player.yaw = me.angle;
+                }
+            }
+        }
+
         // one-time: snap to our server-assigned spawn point
         if !spawned {
             if let Some(state) = &last_state {
                 if let Some(me) = state.players.iter().find(|p| p.id == state.your_id) {
                     player.x = me.x;
                     player.z = me.y; // server y == world z
+                    player.yaw = me.angle; // face the maze, not the wall
                     spawned = true;
+                    input.spawned.store(true, Ordering::Relaxed);
                 }
             }
         }
@@ -332,6 +365,26 @@ async fn main() {
         }
 
         set_default_camera();
+
+        // crosshair: two thin rectangles crossing at screen centre
+        let cx = screen_width() / 2.0;
+        let cy = screen_height() / 2.0;
+        draw_rectangle(cx - 8.0, cy - 1.0, 16.0, 2.0, WHITE);
+        draw_rectangle(cx - 1.0, cy - 8.0, 2.0, 16.0, WHITE);
+
+        // death banner while waiting to respawn
+        if respawning {
+            let msg = "RESPAWNING...";
+            let w = measure_text(msg, None, 48, 1.0).width;
+            draw_text(
+                msg,
+                (screen_width() - w) / 2.0,
+                screen_height() / 2.0 - 60.0,
+                48.0,
+                RED,
+            );
+        }
+
         // FPS display: sample twice a second so the number doesn't flicker
         fps_timer += dt;
         if fps_timer >= 0.5 {

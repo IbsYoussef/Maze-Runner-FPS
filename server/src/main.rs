@@ -66,13 +66,26 @@ struct Player {
     just_shot: bool,
 }
 
+// spawn corners: consecutive ids get diagonal corners,
+// each facing diagonally back into the maze centre
+fn spawn_pos(id: u32) -> (f32, f32, f32) {
+    use std::f32::consts::FRAC_PI_4;
+    match id % 4 {
+        1 => (1.5, 1.5, FRAC_PI_4), // top-left, face toward centre (+x, +z)
+        2 => (14.5, 14.5, -3.0 * FRAC_PI_4), // bottom-right, face back (-x, -z)
+        3 => (14.5, 1.5, -FRAC_PI_4), // top-right, face (-x, +z)
+        _ => (1.5, 14.5, 3.0 * FRAC_PI_4), // bottom-left, face (+x, -z)
+    }
+}
+
 impl Player {
     fn spawn(id: u32, token: u64) -> Self {
+        let (x, y, angle) = spawn_pos(id);
         Self {
             id,
-            x: 1.5,
-            y: 1.5,
-            angle: 0.0,
+            x,
+            y,
+            angle: angle,
             fuel: FUEL_MAX,
             kills: 0,
             respawn_at: None,
@@ -91,9 +104,10 @@ impl Player {
     }
 
     fn respawn(&mut self) {
-        self.x = 1.5;
-        self.y = 1.5;
-        self.angle = 0.0;
+        let (x, y, angle) = spawn_pos(self.id);
+        self.x = x;
+        self.y = y;
+        self.angle = angle;
         self.fuel = FUEL_MAX;
         self.respawn_at = None;
     }
@@ -207,7 +221,11 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players, map: Arc<shared:
         // client-authoritative position (reject positions inside walls)
         let px = packet.x as i32;
         let py = packet.y as i32;
-        if px >= 0 && py >= 0 && !map.is_wall(px as usize, py as usize) {
+        if player.respawn_at.is_none()
+            && px >= 0
+            && py >= 0
+            && !map.is_wall(px as usize, py as usize)
+        {
             player.x = packet.x;
             player.y = packet.y;
         }
@@ -250,8 +268,8 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
                 let mut hit = false;
                 let mut rx = *sx;
                 let mut ry = *sy;
-                let dx = angle.cos();
-                let dy = angle.sin();
+                let dx = angle.sin();
+                let dy = angle.cos();
                 let steps = (SHOOT_RANGE / 0.05) as u32;
                 for _ in 0..steps {
                     rx += dx * 0.05;
@@ -286,9 +304,14 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
                     winner_id = Some(shooter_id);
                 }
             }
-            // respawn victim
+            // respawn victim — move them to their corner immediately so the
+            // position they broadcast while dead is the spawn, not the death spot
             if let Some(victim) = players.values_mut().find(|p| p.id == victim_id) {
                 victim.respawn_at = Some(Instant::now() + Duration::from_secs(RESPAWN_SECS));
+                let (sx, sy, sangle) = spawn_pos(victim.id);
+                victim.x = sx;
+                victim.y = sy;
+                victim.angle = sangle;
                 tracing::info!("player {} was shot, respawning", victim_id);
             }
         }
@@ -319,6 +342,10 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
             if player.fuel <= 0.0 {
                 player.fuel = 0.0;
                 player.respawn_at = Some(Instant::now() + Duration::from_secs(RESPAWN_SECS));
+                let (sx, sy, sangle) = spawn_pos(player.id);
+                player.x = sx;
+                player.y = sy;
+                player.angle = sangle;
                 tracing::info!(
                     "player {} out of fuel, respawn in {}s",
                     player.id,
@@ -374,6 +401,7 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
                 angle: p.angle,
                 fuel: p.fuel,
                 kills: p.kills,
+                respawning: p.respawn_at.is_some(),
             })
             .collect();
 
