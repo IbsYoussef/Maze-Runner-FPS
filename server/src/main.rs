@@ -20,7 +20,7 @@ use clap::Parser;
 
 const TICK_MS: u64 = 16;
 const PLAYER_SPEED: f32 = 0.05;
-const TIMEOUT_SECS: u64 = 10;
+const TIMEOUT_SECS: u64 = 5;
 const RATE_LIMIT_PER_SEC: u32 = 128;
 const FUEL_MAX: f32 = 100.0;
 // depletes over ~90s at 62.5 ticks/sec
