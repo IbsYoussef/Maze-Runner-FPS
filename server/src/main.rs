@@ -29,6 +29,9 @@ const RESPAWN_SECS: u64 = 3;
 
 const SHOOT_RANGE: f32 = 10.0;
 const SHOOT_WIDTH: f32 = 0.3;
+const WIN_DISPLAY_SECS: u64 = 4;
+
+type MatchState = Arc<Mutex<Option<(u32, Instant)>>>; // (winner_id, won_at)
 
 #[derive(Parser, Debug)]
 #[command(name = "maze-wars-server")]
@@ -66,9 +69,6 @@ struct Player {
     just_shot: bool,
 }
 
-// spawn corners: consecutive ids get diagonal corners.
-// Facing: the open cardinal direction most toward the maze centre —
-// map-aware so no spawn ever stares into a point-blank wall.
 // spawn corners: consecutive ids get diagonal corners.
 // Facing: the open cardinal direction most toward the maze centre —
 // map-aware so no spawn ever stares into a point-blank wall.
@@ -115,7 +115,7 @@ impl Player {
             id,
             x,
             y,
-            angle: angle,
+            angle,
             fuel: FUEL_MAX,
             kills: 0,
             respawn_at: None,
@@ -162,6 +162,7 @@ async fn main() {
     tracing::info!("loaded level {}", args.level);
 
     let players: Players = Arc::new(Mutex::new(HashMap::new()));
+    let match_state: MatchState = Arc::new(Mutex::new(None));
 
     // spawn the three tasks
     let listener_handle = tokio::spawn(udp_listener(
@@ -169,8 +170,16 @@ async fn main() {
         Arc::clone(&players),
         Arc::clone(&map),
     ));
-    let tick_handle = tokio::spawn(game_tick(Arc::clone(&players), Arc::clone(&map)));
-    let broadcast_handle = tokio::spawn(broadcast(Arc::clone(&socket), Arc::clone(&players)));
+    let tick_handle = tokio::spawn(game_tick(
+        Arc::clone(&players),
+        Arc::clone(&map),
+        Arc::clone(&match_state),
+    ));
+    let broadcast_handle = tokio::spawn(broadcast(
+        Arc::clone(&socket),
+        Arc::clone(&players),
+        Arc::clone(&match_state),
+    ));
 
     let _ = tokio::try_join!(listener_handle, tick_handle, broadcast_handle);
 }
@@ -265,7 +274,7 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players, map: Arc<shared:
 }
 
 // Game tick task — runs every 16ms, applies movement, checks collisions, drops timeouts
-async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
+async fn game_tick(players: Players, map: Arc<shared::map::Map>, match_state: MatchState) {
     let mut interval = time::interval(Duration::from_millis(TICK_MS));
     loop {
         interval.tick().await;
@@ -348,12 +357,27 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
             }
         }
 
-        // reset match if someone won
+        // record the win — actual reset happens after WIN_DISPLAY_SECS
         if let Some(winner) = winner_id {
-            tracing::info!("player {} wins the match!", winner);
-            for player in players.values_mut() {
-                player.kills = 0;
-                player.respawn(&map);
+            let mut ms = match_state.lock().await;
+            if ms.is_none() {
+                tracing::info!("player {} wins the match!", winner);
+                *ms = Some((winner, Instant::now()));
+            }
+        }
+
+        // after the display window, reset for a new match
+        {
+            let mut ms = match_state.lock().await;
+            if let Some((_, won_at)) = *ms {
+                if won_at.elapsed().as_secs() >= WIN_DISPLAY_SECS {
+                    for player in players.values_mut() {
+                        player.kills = 0;
+                        player.respawn(&map);
+                    }
+                    *ms = None;
+                    tracing::info!("match reset — new round starting");
+                }
             }
         }
 
@@ -410,7 +434,7 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
 }
 
 // Broadcast task — sends current StatePacket to every registered client every tick
-async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
+async fn broadcast(socket: Arc<UdpSocket>, players: Players, match_state: MatchState) {
     let mut interval = time::interval(Duration::from_millis(TICK_MS));
     let mut sequence: u32 = 0;
 
@@ -437,10 +461,13 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players) {
             })
             .collect();
 
-        // check for winner
-        let winner = player_list.iter().find(|p| p.kills >= KILL_LIMIT);
-        let match_over = winner.is_some();
-        let winner_id = winner.map(|p| p.id).unwrap_or(0);
+        // read the held win state instead of recomputing from live kills —
+        // kills are already reset by the time WIN_DISPLAY_SECS elapses,
+        // so this is the only way clients ever see match_over = true
+        let (match_over, winner_id) = match *match_state.lock().await {
+            Some((wid, _)) => (true, wid),
+            None => (false, 0),
+        };
 
         // send each client a StatePacket with their own your_id set
         for (addr, player) in players.iter() {

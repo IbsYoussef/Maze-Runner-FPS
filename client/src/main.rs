@@ -250,6 +250,68 @@ fn draw_minimap(map: &Map, player: &LocalPlayer, state: &Option<StatePacket>) {
     draw_circle(ox + player.x * SCALE, oy + player.z * SCALE, 2.5, YELLOW);
 }
 
+fn draw_scoreboard(state: &StatePacket) {
+    // panel background, below the P-label and fuel readout
+    let rows = state.players.len() as f32;
+
+    draw_rectangle(
+        8.0,
+        60.0,
+        160.0,
+        10.0 + rows * 22.0,
+        Color::new(0.0, 0.0, 0.0, 0.6),
+    );
+
+    for (i, p) in state.players.iter().enumerate() {
+        let y = 78.0 + i as f32 * 22.0;
+        let is_me = p.id == state.your_id;
+        let color = if is_me { YELLOW } else { SKYBLUE };
+        let marker = if is_me { ">" } else { " " };
+        draw_text(
+            &format!("{} P{}  kills: {}", marker, p.id, p.kills),
+            14.0,
+            y,
+            20.0,
+            color,
+        );
+    }
+}
+
+fn draw_win_overlay(state: &StatePacket) {
+    // dim the whole screen
+    draw_rectangle(
+        0.0,
+        0.0,
+        screen_width(),
+        screen_height(),
+        Color::new(0.0, 0.0, 0.0, 0.55),
+    );
+
+    let (msg, color) = if state.winner_id == state.your_id {
+        ("YOU WIN!", GREEN)
+    } else {
+        ("GAME OVER", RED)
+    };
+    let w = measure_text(msg, None, 72, 1.0).width;
+    draw_text(
+        msg,
+        (screen_width() - w) / 2.0,
+        screen_height() / 2.0,
+        72.0,
+        color,
+    );
+
+    let sub = format!("Player {} wins the match", state.winner_id);
+    let sw = measure_text(&sub, None, 28, 1.0).width;
+    draw_text(
+        &sub,
+        (screen_width() - sw) / 2.0,
+        screen_height() / 2.0 + 40.0,
+        28.0,
+        WHITE,
+    );
+}
+
 #[macroquad::main("Maze Runner FPS")]
 async fn main() {
     // load level once, outside the loop
@@ -366,6 +428,20 @@ async fn main() {
 
         set_default_camera();
 
+        // FPS display: sample twice a second so the number doesn't flicker
+        fps_timer += dt;
+        if fps_timer >= 0.5 {
+            fps_display = get_fps();
+            fps_timer = 0.0;
+        }
+        let fps_text = format!("FPS: {}", fps_display);
+        draw_text(&fps_text, screen_width() - 100.0, 30.0, 24.0, YELLOW);
+
+        // who am I? (server-assigned id, once known)
+        if let Some(state) = &last_state {
+            draw_text(&format!("P{}", state.your_id), 12.0, 30.0, 24.0, YELLOW);
+        }
+
         // crosshair: two thin rectangles crossing at screen centre
         let cx = screen_width() / 2.0;
         let cy = screen_height() / 2.0;
@@ -385,20 +461,28 @@ async fn main() {
             );
         }
 
-        // FPS display: sample twice a second so the number doesn't flicker
-        fps_timer += dt;
-        if fps_timer >= 0.5 {
-            fps_display = get_fps();
-            fps_timer = 0.0;
-        }
-        let fps_text = format!("FPS: {}", fps_display);
-        draw_text(&fps_text, screen_width() - 100.0, 30.0, 24.0, YELLOW);
-        draw_minimap(&map, &player, &last_state);
-
-        // who am I? (server-assigned id, once known)
+        // scoreboard, fuel readout, win overlay
         if let Some(state) = &last_state {
-            draw_text(&format!("P{}", state.your_id), 12.0, 30.0, 24.0, YELLOW);
+            // fuel readout for our player (red when low)
+            if let Some(me) = state.players.iter().find(|p| p.id == state.your_id) {
+                let fuel_color = if me.fuel < 25.0 { RED } else { WHITE };
+                draw_text(
+                    &format!("FUEL: {:.0}", me.fuel),
+                    14.0,
+                    48.0,
+                    20.0,
+                    fuel_color,
+                );
+            }
+
+            draw_scoreboard(state);
+
+            if state.match_over {
+                draw_win_overlay(state);
+            }
         }
+
+        draw_minimap(&map, &player, &last_state);
 
         next_frame().await
     }
