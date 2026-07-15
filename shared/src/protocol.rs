@@ -33,6 +33,7 @@ pub struct StatePacket {
     pub players: Vec<PlayerState>,
     pub match_over: bool,
     pub winner_id: u32,
+    pub shot_events: Vec<ShotEvent>, // shots resolved this tick, for cosmetic FX
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -44,4 +45,18 @@ pub struct PlayerState {
     pub fuel: f32,
     pub kills: u32,
     pub respawning: bool, // true while dead & waiting to respawn
+}
+
+// A shot that was resolved this tick — used by clients to trigger
+// cosmetic projectile + splatter effects. Cleared every broadcast,
+// so this is "events this tick" not a persistent history.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ShotEvent {
+    pub shooter_id: u32,
+    pub shooter_x: f32,
+    pub shooter_y: f32,
+    pub shooter_angle: f32,
+    pub hit_x: f32,
+    pub hit_y: f32,
+    pub hit: bool, // true if it landed on a player, false if it just missed/expired
 }

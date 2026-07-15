@@ -14,7 +14,9 @@ use tokio::sync::Mutex;
 use tokio::time;
 
 use shared::map::get_level;
-use shared::protocol::{InputPacket, KILL_LIMIT, MAX_PACKET_BYTES, PlayerState, StatePacket};
+use shared::protocol::{
+    InputPacket, KILL_LIMIT, MAX_PACKET_BYTES, PlayerState, ShotEvent, StatePacket,
+};
 
 use clap::Parser;
 
@@ -32,6 +34,7 @@ const SHOOT_WIDTH: f32 = 0.3;
 const WIN_DISPLAY_SECS: u64 = 4;
 
 type MatchState = Arc<Mutex<Option<(u32, Instant)>>>; // (winner_id, won_at)
+type ShotEvents = Arc<Mutex<Vec<ShotEvent>>>;
 type OpenCells = Arc<Vec<(usize, usize)>>;
 
 #[derive(Parser, Debug)]
@@ -211,6 +214,7 @@ async fn main() {
 
     let players: Players = Arc::new(Mutex::new(HashMap::new()));
     let match_state: MatchState = Arc::new(Mutex::new(None));
+    let shot_events: ShotEvents = Arc::new(Mutex::new(Vec::new()));
 
     // spawn the three tasks
     let listener_handle = tokio::spawn(udp_listener(
@@ -224,11 +228,13 @@ async fn main() {
         Arc::clone(&map),
         Arc::clone(&open),
         Arc::clone(&match_state),
+        Arc::clone(&shot_events),
     ));
     let broadcast_handle = tokio::spawn(broadcast(
         Arc::clone(&socket),
         Arc::clone(&players),
         Arc::clone(&match_state),
+        Arc::clone(&shot_events),
     ));
 
     let _ = tokio::try_join!(listener_handle, tick_handle, broadcast_handle);
@@ -335,6 +341,7 @@ async fn game_tick(
     map: Arc<shared::map::Map>,
     open: OpenCells,
     match_state: MatchState,
+    shot_events_shared: ShotEvents,
 ) {
     let mut interval = time::interval(Duration::from_millis(TICK_MS));
     loop {
@@ -359,44 +366,61 @@ async fn game_tick(
             .map(|p| (p.id, p.x, p.y, p.angle, p.input_shoot && !p.just_shot))
             .collect();
 
-        // resolve shots — find hit player ids
+        // resolve shots — one ray per shooting player, checked against all targets
         let mut hits: Vec<(u32, u32)> = Vec::new(); // (shooter_id, victim_id)
+        let mut tick_shot_events: Vec<ShotEvent> = Vec::new();
+
         for (shooter_id, sx, sy, angle, shooting) in &shooter_data {
             if !shooting {
                 continue;
             }
-            for (target_id, tx, ty, _, _) in &shooter_data {
-                if shooter_id == target_id {
-                    continue;
+
+            let dx = angle.sin();
+            let dy = angle.cos();
+            let mut rx = *sx;
+            let mut ry = *sy;
+            let steps = (SHOOT_RANGE / 0.05) as u32;
+            let mut hit_target: Option<u32> = None;
+
+            for _ in 0..steps {
+                rx += dx * 0.05;
+                ry += dy * 0.05;
+                let ix = rx as i32;
+                let iy = ry as i32;
+                if ix < 0 || iy < 0 || map.is_wall(ix as usize, iy as usize) {
+                    break; // ray stops at a wall — rx, ry is the endpoint
                 }
-                // step ray forward from shooter
-                let mut hit = false;
-                let mut rx = *sx;
-                let mut ry = *sy;
-                let dx = angle.sin();
-                let dy = angle.cos();
-                let steps = (SHOOT_RANGE / 0.05) as u32;
-                for _ in 0..steps {
-                    rx += dx * 0.05;
-                    ry += dy * 0.05;
-                    let ix = rx as i32;
-                    let iy = ry as i32;
-                    if ix < 0 || iy < 0 || map.is_wall(ix as usize, iy as usize) {
-                        break;
-                    }
-                    let dist = ((rx - tx).powi(2) + (ry - ty).powi(2)).sqrt();
-                    if dist < SHOOT_WIDTH {
-                        hit = true;
-                        break;
-                    }
-                }
-                if hit {
-                    hits.push((*shooter_id, *target_id));
-                    tracing::info!("player {} hit player {}", shooter_id, target_id);
-                    break; // one hit per shot
+                // check against every other player at this point along the ray
+                if let Some((target_id, _, _, _, _)) =
+                    shooter_data.iter().find(|(tid, tx, ty, _, _)| {
+                        *tid != *shooter_id
+                            && ((rx - tx).powi(2) + (ry - ty).powi(2)).sqrt() < SHOOT_WIDTH
+                    })
+                {
+                    hit_target = Some(*target_id);
+                    break; // ray stops at the player it hit
                 }
             }
+
+            if let Some(target_id) = hit_target {
+                hits.push((*shooter_id, target_id));
+                tracing::info!("player {} hit player {}", shooter_id, target_id);
+            }
+
+            // record the shot for cosmetic FX regardless of hit or miss
+            tick_shot_events.push(ShotEvent {
+                shooter_id: *shooter_id,
+                shooter_x: *sx,
+                shooter_y: *sy,
+                shooter_angle: *angle,
+                hit_x: rx,
+                hit_y: ry,
+                hit: hit_target.is_some(),
+            });
         }
+
+        // publish this tick's shot events for broadcast to pick up
+        *shot_events_shared.lock().await = tick_shot_events;
 
         // apply hits
         let mut winner_id: Option<u32> = None;
@@ -514,7 +538,12 @@ async fn game_tick(
 }
 
 // Broadcast task — sends current StatePacket to every registered client every tick
-async fn broadcast(socket: Arc<UdpSocket>, players: Players, match_state: MatchState) {
+async fn broadcast(
+    socket: Arc<UdpSocket>,
+    players: Players,
+    match_state: MatchState,
+    shot_events: ShotEvents,
+) {
     let mut interval = time::interval(Duration::from_millis(TICK_MS));
     let mut sequence: u32 = 0;
 
@@ -549,6 +578,9 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players, match_state: MatchS
             None => (false, 0),
         };
 
+        // pull this tick's shot events for the cosmetic FX clients render
+        let events = shot_events.lock().await.clone();
+
         // send each client a StatePacket with their own your_id set
         for (addr, player) in players.iter() {
             let state = StatePacket {
@@ -557,6 +589,7 @@ async fn broadcast(socket: Arc<UdpSocket>, players: Players, match_state: MatchS
                 players: player_list.clone(),
                 match_over,
                 winner_id,
+                shot_events: events.clone(),
             };
 
             let encoded = match postcard::to_allocvec(&state) {
