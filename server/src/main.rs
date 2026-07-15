@@ -66,21 +66,51 @@ struct Player {
     just_shot: bool,
 }
 
-// spawn corners: consecutive ids get diagonal corners,
-// each facing diagonally back into the maze centre
-fn spawn_pos(id: u32) -> (f32, f32, f32) {
-    use std::f32::consts::FRAC_PI_4;
-    match id % 4 {
-        1 => (1.5, 1.5, FRAC_PI_4), // top-left, face toward centre (+x, +z)
-        2 => (14.5, 14.5, -3.0 * FRAC_PI_4), // bottom-right, face back (-x, -z)
-        3 => (14.5, 1.5, -FRAC_PI_4), // top-right, face (-x, +z)
-        _ => (1.5, 14.5, 3.0 * FRAC_PI_4), // bottom-left, face (+x, -z)
+// spawn corners: consecutive ids get diagonal corners.
+// Facing: the open cardinal direction most toward the maze centre —
+// map-aware so no spawn ever stares into a point-blank wall.
+// spawn corners: consecutive ids get diagonal corners.
+// Facing: the open cardinal direction most toward the maze centre —
+// map-aware so no spawn ever stares into a point-blank wall.
+fn spawn_pos(id: u32, map: &shared::map::Map) -> (f32, f32, f32) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+
+    let (x, y): (f32, f32) = match id % 4 {
+        1 => (1.5, 1.5),
+        2 => (14.5, 14.5),
+        3 => (14.5, 1.5),
+        _ => (1.5, 14.5),
+    };
+
+    // candidate facings: (yaw, forward dx, forward dy) — forward = (sin yaw, cos yaw)
+    let candidates: [(f32, f32, f32); 4] = [
+        (0.0, 0.0, 1.0),         // +y
+        (FRAC_PI_2, 1.0, 0.0),   // +x
+        (PI, 0.0, -1.0),         // -y
+        (-FRAC_PI_2, -1.0, 0.0), // -x
+    ];
+
+    let (cx, cy) = (8.0 - x, 8.0 - y); // rough direction to centre
+    let mut best_yaw = 0.0f32;
+    let mut best_score = f32::MIN;
+    for (yaw, dx, dy) in candidates {
+        let nx = (x + dx) as i32;
+        let ny = (y + dy) as i32;
+        if nx < 0 || ny < 0 || map.is_wall(nx as usize, ny as usize) {
+            continue; // that way is a wall — never face it
+        }
+        let score = dx * cx + dy * cy; // dot product: prefer centre-ward
+        if score > best_score {
+            best_score = score;
+            best_yaw = yaw;
+        }
     }
+    (x, y, best_yaw)
 }
 
 impl Player {
-    fn spawn(id: u32, token: u64) -> Self {
-        let (x, y, angle) = spawn_pos(id);
+    fn spawn(id: u32, token: u64, map: &shared::map::Map) -> Self {
+        let (x, y, angle) = spawn_pos(id, map);
         Self {
             id,
             x,
@@ -103,8 +133,8 @@ impl Player {
         }
     }
 
-    fn respawn(&mut self) {
-        let (x, y, angle) = spawn_pos(self.id);
+    fn respawn(&mut self, map: &shared::map::Map) {
+        let (x, y, angle) = spawn_pos(self.id, map);
         self.x = x;
         self.y = y;
         self.angle = angle;
@@ -179,7 +209,7 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players, map: Arc<shared:
             // random session token using address hash + time as entropy source
             let token = src.port() as u64 ^ next_id as u64 ^ 0xdeadbeefcafe;
             tracing::info!("new player {} from {}", next_id, src);
-            players.insert(src, Player::spawn(next_id, token));
+            players.insert(src, Player::spawn(next_id, token, &map));
             next_id += 1;
         }
 
@@ -216,9 +246,10 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players, map: Arc<shared:
         player.input_turn_left = packet.turn_left;
         player.input_turn_right = packet.turn_right;
         player.input_shoot = packet.shoot;
-        player.angle = packet.angle; // client-authoritative view angle
 
-        // client-authoritative position (reject positions inside walls)
+        // client-authoritative position AND angle (reject while the client
+        // hasn't spawned yet — x is -1 — or while dead/respawning, so the
+        // server's assigned spawn position and facing survive the race)
         let px = packet.x as i32;
         let py = packet.y as i32;
         if player.respawn_at.is_none()
@@ -228,6 +259,7 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players, map: Arc<shared:
         {
             player.x = packet.x;
             player.y = packet.y;
+            player.angle = packet.angle;
         }
     }
 }
@@ -308,7 +340,7 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
             // position they broadcast while dead is the spawn, not the death spot
             if let Some(victim) = players.values_mut().find(|p| p.id == victim_id) {
                 victim.respawn_at = Some(Instant::now() + Duration::from_secs(RESPAWN_SECS));
-                let (sx, sy, sangle) = spawn_pos(victim.id);
+                let (sx, sy, sangle) = spawn_pos(victim.id, &map);
                 victim.x = sx;
                 victim.y = sy;
                 victim.angle = sangle;
@@ -321,7 +353,7 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
             tracing::info!("player {} wins the match!", winner);
             for player in players.values_mut() {
                 player.kills = 0;
-                player.respawn();
+                player.respawn(&map);
             }
         }
 
@@ -333,7 +365,7 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
             if let Some(at) = player.respawn_at {
                 if Instant::now() >= at {
                     tracing::info!("player {} respawning", player.id);
-                    player.respawn();
+                    player.respawn(&map);
                 }
                 continue;
             }
@@ -342,7 +374,7 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>) {
             if player.fuel <= 0.0 {
                 player.fuel = 0.0;
                 player.respawn_at = Some(Instant::now() + Duration::from_secs(RESPAWN_SECS));
-                let (sx, sy, sangle) = spawn_pos(player.id);
+                let (sx, sy, sangle) = spawn_pos(player.id, &map);
                 player.x = sx;
                 player.y = sy;
                 player.angle = sangle;
