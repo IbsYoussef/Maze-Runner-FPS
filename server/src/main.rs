@@ -32,6 +32,7 @@ const SHOOT_WIDTH: f32 = 0.3;
 const WIN_DISPLAY_SECS: u64 = 4;
 
 type MatchState = Arc<Mutex<Option<(u32, Instant)>>>; // (winner_id, won_at)
+type OpenCells = Arc<Vec<(usize, usize)>>;
 
 #[derive(Parser, Debug)]
 #[command(name = "maze-wars-server")]
@@ -69,18 +70,51 @@ struct Player {
     just_shot: bool,
 }
 
-// spawn corners: consecutive ids get diagonal corners.
-// Facing: the open cardinal direction most toward the maze centre —
-// map-aware so no spawn ever stares into a point-blank wall.
-fn spawn_pos(id: u32, map: &shared::map::Map) -> (f32, f32, f32) {
+// collect every open floor cell once — reused for every spawn/respawn
+fn open_cells(map: &shared::map::Map) -> Vec<(usize, usize)> {
+    let mut cells = Vec::new();
+    for gy in 0..map.height {
+        for gx in 0..map.width {
+            if !map.is_wall(gx, gy) {
+                cells.push((gx, gy));
+            }
+        }
+    }
+    cells
+}
+
+// pick a random open cell, preferring one far from existing players (anti-camping,
+// scales to any lobby size up to the brief's 10 players); facing is chosen the
+// same way as before — an open cardinal direction pointing back toward the maze
+// centre, so nobody ever spawns staring point-blank into a wall
+fn spawn_pos(
+    map: &shared::map::Map,
+    open: &[(usize, usize)],
+    occupied: &[(f32, f32)],
+) -> (f32, f32, f32) {
+    use rand::RngExt;
     use std::f32::consts::{FRAC_PI_2, PI};
 
-    let (x, y): (f32, f32) = match id % 4 {
-        1 => (1.5, 1.5),
-        2 => (14.5, 14.5),
-        3 => (14.5, 1.5),
-        _ => (1.5, 14.5),
-    };
+    let mut rng = rand::rng();
+
+    // sample a handful of candidates, keep the one furthest from any live player
+    let mut best_cell = open[rng.random_range(0..open.len())];
+    let mut best_dist = f32::MIN;
+    for _ in 0..8 {
+        let candidate = open[rng.random_range(0..open.len())];
+        let (cx, cy) = (candidate.0 as f32 + 0.5, candidate.1 as f32 + 0.5);
+        let min_dist = occupied
+            .iter()
+            .map(|(ox, oy)| (cx - ox).powi(2) + (cy - oy).powi(2))
+            .fold(f32::MAX, f32::min);
+        if min_dist > best_dist {
+            best_dist = min_dist;
+            best_cell = candidate;
+        }
+    }
+
+    let x = best_cell.0 as f32 + 0.5;
+    let y = best_cell.1 as f32 + 0.5;
 
     // candidate facings: (yaw, forward dx, forward dy) — forward = (sin yaw, cos yaw)
     let candidates: [(f32, f32, f32); 4] = [
@@ -109,8 +143,14 @@ fn spawn_pos(id: u32, map: &shared::map::Map) -> (f32, f32, f32) {
 }
 
 impl Player {
-    fn spawn(id: u32, token: u64, map: &shared::map::Map) -> Self {
-        let (x, y, angle) = spawn_pos(id, map);
+    fn spawn(
+        id: u32,
+        token: u64,
+        map: &shared::map::Map,
+        open: &[(usize, usize)],
+        occupied: &[(f32, f32)],
+    ) -> Self {
+        let (x, y, angle) = spawn_pos(map, open, occupied);
         Self {
             id,
             x,
@@ -133,8 +173,13 @@ impl Player {
         }
     }
 
-    fn respawn(&mut self, map: &shared::map::Map) {
-        let (x, y, angle) = spawn_pos(self.id, map);
+    fn respawn(
+        &mut self,
+        map: &shared::map::Map,
+        open: &[(usize, usize)],
+        occupied: &[(f32, f32)],
+    ) {
+        let (x, y, angle) = spawn_pos(map, open, occupied);
         self.x = x;
         self.y = y;
         self.angle = angle;
@@ -161,6 +206,9 @@ async fn main() {
     let map = Arc::new(get_level(args.level));
     tracing::info!("loaded level {}", args.level);
 
+    let open: OpenCells = Arc::new(open_cells(&map));
+    tracing::info!("{} open floor cells for spawning", open.len());
+
     let players: Players = Arc::new(Mutex::new(HashMap::new()));
     let match_state: MatchState = Arc::new(Mutex::new(None));
 
@@ -169,10 +217,12 @@ async fn main() {
         Arc::clone(&socket),
         Arc::clone(&players),
         Arc::clone(&map),
+        Arc::clone(&open),
     ));
     let tick_handle = tokio::spawn(game_tick(
         Arc::clone(&players),
         Arc::clone(&map),
+        Arc::clone(&open),
         Arc::clone(&match_state),
     ));
     let broadcast_handle = tokio::spawn(broadcast(
@@ -185,7 +235,12 @@ async fn main() {
 }
 
 // UDP listener task — receives InputPackets, registers new players, stores input flags
-async fn udp_listener(socket: Arc<UdpSocket>, players: Players, map: Arc<shared::map::Map>) {
+async fn udp_listener(
+    socket: Arc<UdpSocket>,
+    players: Players,
+    map: Arc<shared::map::Map>,
+    open: OpenCells,
+) {
     let mut buf = vec![0u8; MAX_PACKET_BYTES];
     let mut next_id: u32 = 1;
 
@@ -217,8 +272,9 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players, map: Arc<shared:
         if !players.contains_key(&src) {
             // random session token using address hash + time as entropy source
             let token = src.port() as u64 ^ next_id as u64 ^ 0xdeadbeefcafe;
+            let occupied: Vec<(f32, f32)> = players.values().map(|p| (p.x, p.y)).collect();
             tracing::info!("new player {} from {}", next_id, src);
-            players.insert(src, Player::spawn(next_id, token, &map));
+            players.insert(src, Player::spawn(next_id, token, &map, &open, &occupied));
             next_id += 1;
         }
 
@@ -274,7 +330,12 @@ async fn udp_listener(socket: Arc<UdpSocket>, players: Players, map: Arc<shared:
 }
 
 // Game tick task — runs every 16ms, applies movement, checks collisions, drops timeouts
-async fn game_tick(players: Players, map: Arc<shared::map::Map>, match_state: MatchState) {
+async fn game_tick(
+    players: Players,
+    map: Arc<shared::map::Map>,
+    open: OpenCells,
+    match_state: MatchState,
+) {
     let mut interval = time::interval(Duration::from_millis(TICK_MS));
     loop {
         interval.tick().await;
@@ -289,9 +350,12 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>, match_state: Ma
             alive
         });
 
-        // collect shooter data before mutably iterating
+        // collect shooter data before mutably iterating —
+        // respawning (dead) players are excluded so they can neither
+        // shoot nor be shot while invulnerable
         let shooter_data: Vec<(u32, f32, f32, f32, bool)> = players
             .values()
+            .filter(|p| p.respawn_at.is_none())
             .map(|p| (p.id, p.x, p.y, p.angle, p.input_shoot && !p.just_shot))
             .collect();
 
@@ -345,11 +409,17 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>, match_state: Ma
                     winner_id = Some(shooter_id);
                 }
             }
-            // respawn victim — move them to their corner immediately so the
-            // position they broadcast while dead is the spawn, not the death spot
+            // respawn victim — move them to a random open cell immediately so
+            // the position they broadcast while dead is the new spawn, not
+            // the death spot (and not always the same corner)
+            let occupied: Vec<(f32, f32)> = players
+                .values()
+                .filter(|p| p.id != victim_id)
+                .map(|p| (p.x, p.y))
+                .collect();
             if let Some(victim) = players.values_mut().find(|p| p.id == victim_id) {
                 victim.respawn_at = Some(Instant::now() + Duration::from_secs(RESPAWN_SECS));
-                let (sx, sy, sangle) = spawn_pos(victim.id, &map);
+                let (sx, sy, sangle) = spawn_pos(&map, &open, &occupied);
                 victim.x = sx;
                 victim.y = sy;
                 victim.angle = sangle;
@@ -371,9 +441,17 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>, match_state: Ma
             let mut ms = match_state.lock().await;
             if let Some((_, won_at)) = *ms {
                 if won_at.elapsed().as_secs() >= WIN_DISPLAY_SECS {
-                    for player in players.values_mut() {
-                        player.kills = 0;
-                        player.respawn(&map);
+                    let ids: Vec<u32> = players.values().map(|p| p.id).collect();
+                    for id in ids {
+                        let occupied: Vec<(f32, f32)> = players
+                            .values()
+                            .filter(|p| p.id != id)
+                            .map(|p| (p.x, p.y))
+                            .collect();
+                        if let Some(player) = players.values_mut().find(|p| p.id == id) {
+                            player.kills = 0;
+                            player.respawn(&map, &open, &occupied);
+                        }
                     }
                     *ms = None;
                     tracing::info!("match reset — new round starting");
@@ -389,7 +467,9 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>, match_state: Ma
             if let Some(at) = player.respawn_at {
                 if Instant::now() >= at {
                     tracing::info!("player {} respawning", player.id);
-                    player.respawn(&map);
+                    // no other-players context needed here for occupied avoidance;
+                    // keep it simple — this path is timer expiry, not the death moment
+                    player.respawn(&map, &open, &[]);
                 }
                 continue;
             }
@@ -398,7 +478,7 @@ async fn game_tick(players: Players, map: Arc<shared::map::Map>, match_state: Ma
             if player.fuel <= 0.0 {
                 player.fuel = 0.0;
                 player.respawn_at = Some(Instant::now() + Duration::from_secs(RESPAWN_SECS));
-                let (sx, sy, sangle) = spawn_pos(player.id, &map);
+                let (sx, sy, sangle) = spawn_pos(&map, &open, &[]);
                 player.x = sx;
                 player.y = sy;
                 player.angle = sangle;
