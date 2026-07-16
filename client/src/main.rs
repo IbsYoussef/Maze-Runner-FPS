@@ -444,7 +444,9 @@ async fn main() {
     println!("Starting...");
 
     // load level once, outside the loop
-    let map = get_level(1);
+    let mut map = get_level(1); // placeholder until we hear from the server
+    let mut map_loaded_level: u8 = 1;
+
     let mut player = LocalPlayer {
         x: 1.5,
         z: 1.5,
@@ -523,6 +525,14 @@ async fn main() {
         // drain incoming state — keep only the newest
         while let Ok(s) = state_rx.try_recv() {
             last_state = Some(s);
+        }
+
+        // sync to the server's actual level the first time it differs
+        if let Some(state) = &last_state {
+            if state.level != map_loaded_level {
+                map = get_level(state.level);
+                map_loaded_level = state.level;
+            }
         }
 
         // spawn any cosmetic projectiles/death-delays from this tick's shot events

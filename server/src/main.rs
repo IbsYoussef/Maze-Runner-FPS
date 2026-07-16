@@ -240,6 +240,7 @@ async fn main() {
         Arc::clone(&players),
         Arc::clone(&match_state),
         Arc::clone(&shot_events),
+        args.level,
     ));
 
     let _ = tokio::try_join!(listener_handle, tick_handle, broadcast_handle);
@@ -567,6 +568,7 @@ async fn broadcast(
     players: Players,
     match_state: MatchState,
     shot_events: ShotEvents,
+    level: u8,
 ) {
     let mut interval = time::interval(Duration::from_millis(TICK_MS));
     let mut sequence: u32 = 0;
@@ -619,6 +621,7 @@ async fn broadcast(
                 match_over,
                 winner_id,
                 shot_events: events.clone(),
+                level,
             };
 
             let encoded = match postcard::to_allocvec(&state) {

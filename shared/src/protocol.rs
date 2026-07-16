@@ -35,6 +35,7 @@ pub struct StatePacket {
     pub match_over: bool,
     pub winner_id: u32,
     pub shot_events: Vec<ShotEvent>, // shots resolved this tick, for cosmetic FX
+    pub level: u8,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -46,7 +47,7 @@ pub struct PlayerState {
     pub fuel: f32,
     pub kills: u32,
     pub respawning: bool, // true while dead & waiting to respawn
-    pub username: String, 
+    pub username: String,
 }
 
 // A shot that was resolved this tick — used by clients to trigger
