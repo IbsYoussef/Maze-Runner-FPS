@@ -32,6 +32,7 @@ const RESPAWN_SECS: u64 = 3;
 const SHOOT_RANGE: f32 = 10.0;
 const SHOOT_WIDTH: f32 = 0.3;
 const WIN_DISPLAY_SECS: u64 = 4;
+const SHOOT_COOLDOWN_MS: u64 = 250; // minimum gap between shots, click as fast as you want
 
 type MatchState = Arc<Mutex<Option<(u32, Instant)>>>; // (winner_id, won_at)
 type ShotEvents = Arc<Mutex<Vec<ShotEvent>>>;
@@ -71,6 +72,7 @@ struct Player {
     input_turn_right: bool,
     input_shoot: bool,
     just_shot: bool,
+    last_shot_at: Option<Instant>,
 }
 
 // collect every open floor cell once — reused for every spawn/respawn
@@ -173,6 +175,7 @@ impl Player {
             input_turn_right: false,
             input_shoot: false,
             just_shot: false,
+            last_shot_at: None,
         }
     }
 
@@ -360,10 +363,17 @@ async fn game_tick(
         // collect shooter data before mutably iterating —
         // respawning (dead) players are excluded so they can neither
         // shoot nor be shot while invulnerable
+        let now_tick = Instant::now();
         let shooter_data: Vec<(u32, f32, f32, f32, bool)> = players
             .values()
             .filter(|p| p.respawn_at.is_none())
-            .map(|p| (p.id, p.x, p.y, p.angle, p.input_shoot && !p.just_shot))
+            .map(|p| {
+                let can_fire = p.input_shoot
+                    && p.last_shot_at
+                        .map(|t| now_tick.duration_since(t).as_millis() as u64 >= SHOOT_COOLDOWN_MS)
+                        .unwrap_or(true);
+                (p.id, p.x, p.y, p.angle, can_fire)
+            })
             .collect();
 
         // resolve shots — one ray per shooting player, checked against all targets
@@ -373,6 +383,9 @@ async fn game_tick(
         for (shooter_id, sx, sy, angle, shooting) in &shooter_data {
             if !shooting {
                 continue;
+            }
+            if let Some(shooter) = players.values_mut().find(|p| p.id == *shooter_id) {
+                shooter.last_shot_at = Some(now_tick);
             }
 
             let dx = angle.sin();
@@ -419,8 +432,11 @@ async fn game_tick(
             });
         }
 
-        // publish this tick's shot events for broadcast to pick up
-        *shot_events_shared.lock().await = tick_shot_events;
+        // accumulate this tick's shot events — broadcast drains them, so multiple
+        // game_tick iterations between broadcast reads won't clobber each other
+        if !tick_shot_events.is_empty() {
+            shot_events_shared.lock().await.extend(tick_shot_events);
+        }
 
         // apply hits
         let mut winner_id: Option<u32> = None;
@@ -578,8 +594,12 @@ async fn broadcast(
             None => (false, 0),
         };
 
-        // pull this tick's shot events for the cosmetic FX clients render
-        let events = shot_events.lock().await.clone();
+        // drain (not just clone) — each event must be sent exactly once, never
+        // re-sent on the next broadcast and never silently lost between ticks
+        let events: Vec<shared::protocol::ShotEvent> = {
+            let mut guard = shot_events.lock().await;
+            std::mem::take(&mut *guard)
+        };
 
         // send each client a StatePacket with their own your_id set
         for (addr, player) in players.iter() {

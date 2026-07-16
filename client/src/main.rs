@@ -54,6 +54,8 @@ fn net_thread(server_addr: String, input: Arc<NetInput>, state_tx: mpsc::SyncSen
     let mut seq = 0u32;
     let mut buf = vec![0u8; MAX_PACKET_BYTES];
 
+    let mut pending_events: Vec<shared::protocol::ShotEvent> = Vec::new();
+
     loop {
         let t0 = Instant::now();
         seq += 1;
@@ -85,16 +87,23 @@ fn net_thread(server_addr: String, input: Arc<NetInput>, state_tx: mpsc::SyncSen
             let _ = socket.send(&enc);
         }
 
-        // drain ALL queued packets, forward only the newest —
-        // otherwise a backlog builds in the OS buffer and latency grows forever
+        // drain ALL queued packets. Positions only need the newest packet,
+        // but shot_events are transient — if the channel is briefly full and
+        // try_send fails, we must NOT lose the events; keep them pending and
+        // retry on the next iteration instead of silently dropping them.
         let mut newest: Option<StatePacket> = None;
         while let Ok(len) = socket.recv(&mut buf) {
             if let Ok(state) = postcard::from_bytes::<StatePacket>(&buf[..len]) {
+                pending_events.extend(state.shot_events.iter().cloned());
                 newest = Some(state);
             }
         }
-        if let Some(state) = newest {
-            let _ = state_tx.try_send(state);
+        if let Some(mut state) = newest {
+            state.shot_events = pending_events.clone();
+            if state_tx.try_send(state).is_ok() {
+                pending_events.clear(); // only clear once actually delivered
+            }
+            // if try_send failed, pending_events survives to the next iteration
         }
 
         let elapsed = t0.elapsed();
@@ -196,18 +205,83 @@ fn draw_maze(map: &Map) {
     }
 }
 
-fn draw_players(state: &StatePacket) {
+struct Projectile {
+    start: Vec3,
+    end: Vec3,
+    spawned_at: Instant,
+}
+
+const PROJECTILE_TRAVEL_SECS: f32 = 0.08;
+
+// player_id -> instant after which it's safe to actually hide them,
+// so a victim doesn't vanish before their incoming projectile visually lands
+struct DeathDelay {
+    hidden_after: std::collections::HashMap<u32, Instant>,
+}
+
+fn spawn_projectiles(
+    events: &[shared::protocol::ShotEvent],
+    projectiles: &mut Vec<Projectile>,
+    players: &[shared::protocol::PlayerState],
+    death_delay: &mut DeathDelay,
+) {
+    for ev in events {
+        projectiles.push(Projectile {
+            start: vec3(ev.shooter_x, 0.5, ev.shooter_y),
+            end: vec3(ev.hit_x, 0.5, ev.hit_y),
+            spawned_at: Instant::now(),
+        });
+
+        if ev.hit {
+            // find whoever is closest to the impact point — that's the victim
+            if let Some(victim) = players.iter().min_by(|a, b| {
+                let da = (a.x - ev.hit_x).powi(2) + (a.y - ev.hit_y).powi(2);
+                let db = (b.x - ev.hit_x).powi(2) + (b.y - ev.hit_y).powi(2);
+                da.partial_cmp(&db).unwrap()
+            }) {
+                death_delay.hidden_after.insert(
+                    victim.id,
+                    Instant::now() + Duration::from_secs_f32(PROJECTILE_TRAVEL_SECS),
+                );
+            }
+        }
+    }
+}
+
+fn draw_projectiles(projectiles: &mut Vec<Projectile>) {
+    let now = Instant::now();
+    projectiles.retain(|p| {
+        let t = now.duration_since(p.spawned_at).as_secs_f32() / PROJECTILE_TRAVEL_SECS;
+        if t >= 1.0 {
+            return false; // expired, remove
+        }
+        let pos = p.start + (p.end - p.start) * t;
+        draw_cube(pos, vec3(0.15, 0.15, 0.15), None, YELLOW);
+        true
+    });
+}
+
+fn draw_players(state: &StatePacket, death_delay: &DeathDelay) {
+    let now = Instant::now();
     for p in &state.players {
-        if p.id == state.your_id || p.respawning {
+        if p.id == state.your_id {
             continue;
         }
-        // server (x, y) is our world (x, z); server angle unused for now
-        draw_cube(
-            vec3(p.x, 0.4, p.y), // slightly lower than walls
-            vec3(0.5, 0.8, 0.5), // slimmer than a wall cube, reads as a figure
-            None,
-            SKYBLUE,
-        );
+        // still respawning AND past the grace period? then actually hide them.
+        // if still within the grace window, keep drawing so the projectile
+        // and the death feel simultaneous rather than the victim vanishing early
+        if p.respawning {
+            if let Some(hide_at) = death_delay.hidden_after.get(&p.id) {
+                if now < *hide_at {
+                    // grace period active — fall through and draw normally below
+                } else {
+                    continue; // grace expired, hide as normal
+                }
+            } else {
+                continue; // no grace scheduled, hide immediately (e.g. died to fuel)
+            }
+        }
+        draw_cube(vec3(p.x, 0.4, p.y), vec3(0.5, 0.8, 0.5), None, SKYBLUE);
     }
 }
 
@@ -337,6 +411,11 @@ async fn main() {
     let mut fps_timer = 0.0f32;
 
     let mut spawned = false;
+    let mut projectiles: Vec<Projectile> = Vec::new();
+
+    let mut death_delay = DeathDelay {
+        hidden_after: std::collections::HashMap::new(),
+    };
 
     loop {
         let dt = get_frame_time();
@@ -391,6 +470,16 @@ async fn main() {
             last_state = Some(s);
         }
 
+        // spawn any cosmetic projectiles/death-delays from this tick's shot events
+        if let Some(state) = &last_state {
+            spawn_projectiles(
+                &state.shot_events,
+                &mut projectiles,
+                &state.players,
+                &mut death_delay,
+            );
+        }
+
         // if WE are respawning, the server owns our position — snap to it
         let mut respawning = false;
         if let Some(state) = &last_state {
@@ -423,7 +512,8 @@ async fn main() {
         draw_maze(&map);
 
         if let Some(state) = &last_state {
-            draw_players(state);
+            draw_players(state, &death_delay);
+            draw_projectiles(&mut projectiles);
         }
 
         set_default_camera();
