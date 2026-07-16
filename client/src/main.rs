@@ -42,7 +42,12 @@ impl NetInput {
     }
 }
 
-fn net_thread(server_addr: String, input: Arc<NetInput>, state_tx: mpsc::SyncSender<StatePacket>) {
+fn net_thread(
+    server_addr: String,
+    username: String,
+    input: Arc<NetInput>,
+    state_tx: mpsc::SyncSender<StatePacket>,
+) {
     let socket = UdpSocket::bind("0.0.0.0:0").expect("bind failed");
     socket.connect(&server_addr).expect("connect failed");
     socket
@@ -55,6 +60,10 @@ fn net_thread(server_addr: String, input: Arc<NetInput>, state_tx: mpsc::SyncSen
     let mut buf = vec![0u8; MAX_PACKET_BYTES];
 
     let mut pending_events: Vec<shared::protocol::ShotEvent> = Vec::new();
+
+    // username is sent once on the first packet only, to avoid resending
+    // the same string 60 times a second — the server remembers it after that
+    let mut username_sent = false;
 
     loop {
         let t0 = Instant::now();
@@ -82,9 +91,15 @@ fn net_thread(server_addr: String, input: Arc<NetInput>, state_tx: mpsc::SyncSen
             } else {
                 -1.0
             },
+            username: if username_sent {
+                String::new()
+            } else {
+                username.clone()
+            },
         };
         if let Ok(enc) = postcard::to_allocvec(&pkt) {
             let _ = socket.send(&enc);
+            username_sent = true;
         }
 
         // drain ALL queued packets. Positions only need the newest packet,
@@ -325,13 +340,35 @@ fn draw_minimap(map: &Map, player: &LocalPlayer, state: &Option<StatePacket>) {
 }
 
 fn draw_scoreboard(state: &StatePacket) {
+    // truncate names to fit layout
+    fn display_name(p: &shared::protocol::PlayerState) -> String {
+        let name = if p.username.is_empty() {
+            format!("P{}", p.id)
+        } else {
+            p.username.clone()
+        };
+        if name.chars().count() > 12 {
+            format!("{}...", name.chars().take(12).collect::<String>())
+        } else {
+            name
+        }
+    }
+
     // panel background, below the P-label and fuel readout
-    let rows = state.players.len() as f32;
+    let rows: f32 = state.players.len() as f32;
+
+    // measure the widest row so the panel always fits its content
+    let mut panel_w = 100.0f32; // sensible minimum
+    for p in &state.players {
+        let text = format!("> {}  kills: {}", display_name(p), p.kills);
+        let w = measure_text(&text, None, 20, 1.0).width;
+        panel_w = panel_w.max(w + 24.0); // padding either side
+    }
 
     draw_rectangle(
         8.0,
         60.0,
-        160.0,
+        panel_w,
         10.0 + rows * 22.0,
         Color::new(0.0, 0.0, 0.0, 0.6),
     );
@@ -342,7 +379,7 @@ fn draw_scoreboard(state: &StatePacket) {
         let color = if is_me { YELLOW } else { SKYBLUE };
         let marker = if is_me { ">" } else { " " };
         draw_text(
-            &format!("{} P{}  kills: {}", marker, p.id, p.kills),
+            &format!("{} {}  kills: {}", marker, display_name(p), p.kills),
             14.0,
             y,
             20.0,
@@ -386,8 +423,26 @@ fn draw_win_overlay(state: &StatePacket) {
     );
 }
 
+// prompts the player for connection details before the game window opens,
+// matching the brief's terminal startup flow exactly
+fn prompt_input(label: &str) -> String {
+    use std::io::Write;
+    print!("{label}");
+    std::io::stdout().flush().unwrap();
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .expect("failed to read input");
+    input.trim().to_string()
+}
+
 #[macroquad::main("Maze Runner FPS")]
 async fn main() {
+    // startup flow: prompt for server IP and username
+    let server_addr = prompt_input("Enter IP Address: ");
+    let username = prompt_input("Enter Name: ");
+    println!("Starting...");
+
     // load level once, outside the loop
     let map = get_level(1);
     let mut player = LocalPlayer {
@@ -401,7 +456,7 @@ async fn main() {
     let (state_tx, state_rx) = mpsc::sync_channel::<StatePacket>(1);
     {
         let input = Arc::clone(&input);
-        thread::spawn(move || net_thread("127.0.0.1:34254".into(), input, state_tx));
+        thread::spawn(move || net_thread(server_addr.clone(), username.clone(), input, state_tx));
     }
     let mut last_state: Option<StatePacket> = None;
 

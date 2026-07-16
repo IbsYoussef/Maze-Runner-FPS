@@ -21,8 +21,9 @@ pub struct InputPacket {
     pub turn_right: bool,
     pub shoot: bool,
     pub angle: f32,
-    pub x: f32, // client-authoritative position
-    pub y: f32, // (server "y" == client world z)
+    pub x: f32,           // client-authoritative position
+    pub y: f32,           // (server "y" == client world z)
+    pub username: String, // sent once on first packet, empty afterward
 }
 
 // Server → Client
@@ -45,6 +46,7 @@ pub struct PlayerState {
     pub fuel: f32,
     pub kills: u32,
     pub respawning: bool, // true while dead & waiting to respawn
+    pub username: String, 
 }
 
 // A shot that was resolved this tick — used by clients to trigger

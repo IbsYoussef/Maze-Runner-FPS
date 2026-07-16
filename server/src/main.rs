@@ -73,6 +73,7 @@ struct Player {
     input_shoot: bool,
     just_shot: bool,
     last_shot_at: Option<Instant>,
+    username: String,
 }
 
 // collect every open floor cell once — reused for every spawn/respawn
@@ -176,6 +177,7 @@ impl Player {
             input_shoot: false,
             just_shot: false,
             last_shot_at: None,
+            username: String::new(),
         }
     }
 
@@ -288,6 +290,12 @@ async fn udp_listener(
         }
 
         let player = players.get_mut(&src).unwrap();
+
+        // adopt the username on the first non-empty report (sent once by client)
+        if !packet.username.is_empty() && player.username.is_empty() {
+            player.username = packet.username.clone();
+            tracing::info!("player {} identified as '{}'", player.id, player.username);
+        }
 
         // rate limiting
         let now = Instant::now();
@@ -583,6 +591,7 @@ async fn broadcast(
                 fuel: p.fuel,
                 kills: p.kills,
                 respawning: p.respawn_at.is_some(),
+                username: p.username.clone(),
             })
             .collect();
 
