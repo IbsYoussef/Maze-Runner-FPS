@@ -592,9 +592,16 @@ async fn main() {
         let fps_text = format!("FPS: {}", fps_display);
         draw_text(&fps_text, screen_width() - 100.0, 30.0, 24.0, YELLOW);
 
-        // who am I? (server-assigned id, once known)
+        // show our own username top-left instead of a generic player number
         if let Some(state) = &last_state {
-            draw_text(&format!("P{}", state.your_id), 12.0, 30.0, 24.0, YELLOW);
+            if let Some(me) = state.players.iter().find(|p| p.id == state.your_id) {
+                let name = if me.username.is_empty() {
+                    format!("P{}", me.id)
+                } else {
+                    me.username.clone()
+                };
+                draw_text(&name, 12.0, 30.0, 24.0, YELLOW);
+            }
         }
 
         // crosshair: two thin rectangles crossing at screen centre
