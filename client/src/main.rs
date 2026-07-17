@@ -500,7 +500,7 @@ async fn main() {
         // the spike filter discards implausible jumps (e.g. the initial grab warp)
         let raw = mouse_delta_position();
         let look_dx = if grabbed && raw.x.abs() < 0.2 {
-            -raw.x
+            raw.x
         } else {
             0.0
         };

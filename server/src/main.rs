@@ -260,7 +260,9 @@ async fn udp_listener(
         let (len, src) = match socket.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("recv error: {e}");
+                if e.raw_os_error() != Some(10054) {
+                    tracing::warn!("recv error: {e}");
+                }
                 continue;
             }
         };
