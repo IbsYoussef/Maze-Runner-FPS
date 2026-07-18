@@ -1,7 +1,6 @@
 use macroquad::prelude::*;
 use shared::map::{Map, get_level};
 use shared::protocol::{InputPacket, MAX_PACKET_BYTES, StatePacket};
-
 use std::net::UdpSocket;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -54,21 +53,16 @@ fn net_thread(
         .set_read_timeout(Some(Duration::from_millis(1)))
         .unwrap();
     println!("net thread connected to {server_addr}");
-
     let interval = Duration::from_millis(1000 / NET_HZ);
     let mut seq = 0u32;
     let mut buf = vec![0u8; MAX_PACKET_BYTES];
-
     let mut pending_events: Vec<shared::protocol::ShotEvent> = Vec::new();
-
     // username is sent once on the first packet only, to avoid resending
     // the same string 60 times a second — the server remembers it after that
     let mut username_sent = false;
-
     loop {
         let t0 = Instant::now();
         seq += 1;
-
         let pkt = InputPacket {
             sequence: seq,
             player_id: 0,
@@ -101,7 +95,6 @@ fn net_thread(
             let _ = socket.send(&enc);
             username_sent = true;
         }
-
         // drain ALL queued packets. Positions only need the newest packet,
         // but shot_events are transient — if the channel is briefly full and
         // try_send fails, we must NOT lose the events; keep them pending and
@@ -120,7 +113,6 @@ fn net_thread(
             }
             // if try_send failed, pending_events survives to the next iteration
         }
-
         let elapsed = t0.elapsed();
         if elapsed < interval {
             thread::sleep(interval - elapsed);
@@ -246,7 +238,6 @@ fn spawn_projectiles(
             end: vec3(ev.hit_x, 0.5, ev.hit_y),
             spawned_at: Instant::now(),
         });
-
         if ev.hit {
             // find whoever is closest to the impact point — that's the victim
             if let Some(victim) = players.iter().min_by(|a, b| {
@@ -446,7 +437,6 @@ async fn main() {
     // load level once, outside the loop
     let mut map = get_level(1); // placeholder until we hear from the server
     let mut map_loaded_level: u8 = 1;
-
     let mut player = LocalPlayer {
         x: 1.5,
         z: 1.5,
@@ -496,11 +486,17 @@ async fn main() {
             Ordering::Relaxed,
         );
 
-        // mouse look delta — mouse_delta_position() handles cursor-grab warping;
-        // the spike filter discards implausible jumps (e.g. the initial grab warp)
+        // mouse look: best-effort via mouse_delta_position(). Verified working
+        // correctly on native Windows and native Linux (per macroquad's own
+        // maintainer, PR #181). Under WSLg (including inside Docker, since
+        // Docker still forwards to WSLg's own X11 implementation) this API
+        // is unreliable — deltas read as zero or spike to corrupted values
+        // in the thousands. Arrow keys (see LocalPlayer::update) are the
+        // reliable turning method in that environment; this is left in place
+        // harmlessly for when the client runs on a real OS/display server.
         let raw = mouse_delta_position();
-        let look_dx = if grabbed && raw.x.abs() < 0.2 {
-            raw.x
+        let look_dx = if grabbed && raw.x.abs() < 150.0 {
+            -raw.x
         } else {
             0.0
         };
@@ -636,9 +632,7 @@ async fn main() {
                     fuel_color,
                 );
             }
-
             draw_scoreboard(state);
-
             if state.match_over {
                 draw_win_overlay(state);
             }

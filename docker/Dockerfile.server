@@ -1,0 +1,25 @@
+# Server, headless, multi-stage with cargo-chef dependency caching
+FROM rust:1.97.1-slim-bookworm AS chef
+RUN cargo install cargo-chef
+WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+# install build dependencies for the workspace
+RUN apt-get update && apt-get install -y pkg-config && rm -rf /var/lib/apt/lists/*
+COPY --from=planner /app/recipe.json recipe.json
+# cache dependencies, only rebuilds when Cargo.toml/Cargo.lock change
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release -p server && cp target/release/server /usr/local/bin/maze-server
+
+# minimal distroless runtime — no shell, non-root, ~36MB overhead
+FROM gcr.io/distroless/cc-debian12 AS runtime
+WORKDIR /app
+COPY --from=builder /usr/local/bin/maze-server /usr/local/bin/maze-server
+EXPOSE 34254/udp
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/maze-server"]
