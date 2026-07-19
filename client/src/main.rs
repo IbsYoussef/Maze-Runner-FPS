@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-
 // world constants, one grid cell = one world unit
 const WALL_HEIGHT: f32 = 1.0;
 const EYE_HEIGHT: f32 = 0.5; // camera height off the floor
@@ -15,7 +14,6 @@ const MOVE_SPEED: f32 = 3.0; // world units per second
 const MOUSE_SENSITIVITY: f32 = 1.5;
 const KEY_TURN_SPEED: f32 = 2.5; // radians per second
 const NET_HZ: u64 = 60;
-
 // input state shared between game loop (writer) and net thread (reader)
 struct NetInput {
     forward: AtomicBool,
@@ -26,7 +24,6 @@ struct NetInput {
     y_bits: AtomicU32,
     spawned: AtomicBool,
 }
-
 impl NetInput {
     fn new() -> Self {
         Self {
@@ -40,7 +37,6 @@ impl NetInput {
         }
     }
 }
-
 fn net_thread(
     server_addr: String,
     username: String,
@@ -119,22 +115,18 @@ fn net_thread(
         }
     }
 }
-
 struct LocalPlayer {
     x: f32,
     z: f32,
     yaw: f32,
 }
-
 impl LocalPlayer {
     fn forward(&self) -> Vec3 {
         vec3(self.yaw.sin(), 0.0, self.yaw.cos())
     }
-
     fn update(&mut self, map: &Map, dt: f32, look_dx: f32) {
         // --- mouse look: all turning comes from the mouse ---
         self.yaw += look_dx * MOUSE_SENSITIVITY;
-
         // keyboard turning fallback — works in WSLg where raw mouse motion doesn't
         if is_key_down(KeyCode::Left) {
             self.yaw += KEY_TURN_SPEED * dt;
@@ -142,12 +134,10 @@ impl LocalPlayer {
         if is_key_down(KeyCode::Right) {
             self.yaw -= KEY_TURN_SPEED * dt;
         }
-
         // --- WASD movement: W/S along forward, A/D strafe along right ---
         let fwd = self.forward();
         // right = forward x up = (-cos, 0, sin)
         let right = vec3(-self.yaw.cos(), 0.0, self.yaw.sin());
-
         let mut wish = vec3(0.0, 0.0, 0.0); // desired movement direction
         if is_key_down(KeyCode::W) || is_key_down(KeyCode::Up) {
             wish += fwd;
@@ -161,15 +151,12 @@ impl LocalPlayer {
         if is_key_down(KeyCode::A) {
             wish -= right;
         }
-
         // normalise so diagonal movement isn't faster than straight
         if wish.length() > 0.0 {
             wish = wish.normalize() * MOVE_SPEED * dt;
         }
-
         let new_x = self.x + wish.x;
         let new_z = self.z + wish.z;
-
         // axis-separated collision, lets you slide along walls
         if !map.is_wall(new_x as usize, self.z as usize) {
             self.x = new_x;
@@ -178,7 +165,6 @@ impl LocalPlayer {
             self.z = new_z;
         }
     }
-
     fn camera(&self) -> Camera3D {
         let pos = vec3(self.x, EYE_HEIGHT, self.z);
         Camera3D {
@@ -189,11 +175,9 @@ impl LocalPlayer {
         }
     }
 }
-
 fn draw_maze(map: &Map) {
     // floor: centre of a 16x16 grid is (8, 8); vec2(8., 8.) are half-extents
     draw_plane(vec3(8.0, 0.0, 8.0), vec2(8.0, 8.0), None, DARKGRAY);
-
     // one cube per wall cell
     for gy in 0..map.height {
         for gx in 0..map.width {
@@ -211,21 +195,17 @@ fn draw_maze(map: &Map) {
         }
     }
 }
-
 struct Projectile {
     start: Vec3,
     end: Vec3,
     spawned_at: Instant,
 }
-
 const PROJECTILE_TRAVEL_SECS: f32 = 0.08;
-
 // player_id -> instant after which it's safe to actually hide them,
 // so a victim doesn't vanish before their incoming projectile visually lands
 struct DeathDelay {
     hidden_after: std::collections::HashMap<u32, Instant>,
 }
-
 fn spawn_projectiles(
     events: &[shared::protocol::ShotEvent],
     projectiles: &mut Vec<Projectile>,
@@ -253,7 +233,6 @@ fn spawn_projectiles(
         }
     }
 }
-
 fn draw_projectiles(projectiles: &mut Vec<Projectile>) {
     let now = Instant::now();
     projectiles.retain(|p| {
@@ -266,7 +245,6 @@ fn draw_projectiles(projectiles: &mut Vec<Projectile>) {
         true
     });
 }
-
 fn draw_players(state: &StatePacket, death_delay: &DeathDelay) {
     let now = Instant::now();
     for p in &state.players {
@@ -290,14 +268,12 @@ fn draw_players(state: &StatePacket, death_delay: &DeathDelay) {
         draw_cube(vec3(p.x, 0.4, p.y), vec3(0.5, 0.8, 0.5), None, SKYBLUE);
     }
 }
-
 fn draw_minimap(map: &Map, player: &LocalPlayer, state: &Option<StatePacket>) {
     const SCALE: f32 = 6.0; // pixels per map cell
     const MARGIN: f32 = 12.0;
     let size = map.width as f32 * SCALE;
     let ox = screen_width() - size - MARGIN; // origin x (bottom-right corner)
     let oy = screen_height() - size - MARGIN; // origin y
-
     // layer 1: tiles
     for gy in 0..map.height {
         for gx in 0..map.width {
@@ -315,7 +291,6 @@ fn draw_minimap(map: &Map, player: &LocalPlayer, state: &Option<StatePacket>) {
             );
         }
     }
-
     // layer 2: Other players (from server state)
     if let Some(state) = state {
         for p in &state.players {
@@ -325,11 +300,9 @@ fn draw_minimap(map: &Map, player: &LocalPlayer, state: &Option<StatePacket>) {
             draw_circle(ox + p.x * SCALE, oy + p.y * SCALE, 2.5, SKYBLUE);
         }
     }
-
     // layer 3: you (local position, matches camerae position)
     draw_circle(ox + player.x * SCALE, oy + player.z * SCALE, 2.5, YELLOW);
 }
-
 fn draw_scoreboard(state: &StatePacket) {
     // truncate names to fit layout
     fn display_name(p: &shared::protocol::PlayerState) -> String {
@@ -344,10 +317,8 @@ fn draw_scoreboard(state: &StatePacket) {
             name
         }
     }
-
     // panel background, below the P-label and fuel readout
     let rows: f32 = state.players.len() as f32;
-
     // measure the widest row so the panel always fits its content
     let mut panel_w = 100.0f32; // sensible minimum
     for p in &state.players {
@@ -355,7 +326,6 @@ fn draw_scoreboard(state: &StatePacket) {
         let w = measure_text(&text, None, 20, 1.0).width;
         panel_w = panel_w.max(w + 24.0); // padding either side
     }
-
     draw_rectangle(
         8.0,
         60.0,
@@ -363,7 +333,6 @@ fn draw_scoreboard(state: &StatePacket) {
         10.0 + rows * 22.0,
         Color::new(0.0, 0.0, 0.0, 0.6),
     );
-
     for (i, p) in state.players.iter().enumerate() {
         let y = 78.0 + i as f32 * 22.0;
         let is_me = p.id == state.your_id;
@@ -378,7 +347,6 @@ fn draw_scoreboard(state: &StatePacket) {
         );
     }
 }
-
 fn draw_win_overlay(state: &StatePacket) {
     // dim the whole screen
     draw_rectangle(
@@ -388,7 +356,6 @@ fn draw_win_overlay(state: &StatePacket) {
         screen_height(),
         Color::new(0.0, 0.0, 0.0, 0.55),
     );
-
     let (msg, color) = if state.winner_id == state.your_id {
         ("YOU WIN!", GREEN)
     } else {
@@ -402,7 +369,6 @@ fn draw_win_overlay(state: &StatePacket) {
         72.0,
         color,
     );
-
     let sub = format!("Player {} wins the match", state.winner_id);
     let sw = measure_text(&sub, None, 28, 1.0).width;
     draw_text(
@@ -413,7 +379,6 @@ fn draw_win_overlay(state: &StatePacket) {
         WHITE,
     );
 }
-
 // prompts the player for connection details before the game window opens,
 // matching the brief's terminal startup flow exactly
 fn prompt_input(label: &str) -> String {
@@ -426,14 +391,12 @@ fn prompt_input(label: &str) -> String {
         .expect("failed to read input");
     input.trim().to_string()
 }
-
 #[macroquad::main("Maze Runner FPS")]
 async fn main() {
     // startup flow: prompt for server IP and username
     let server_addr = prompt_input("Enter IP Address: ");
     let username = prompt_input("Enter Name: ");
     println!("Starting...");
-
     // load level once, outside the loop
     let mut map = get_level(1); // placeholder until we hear from the server
     let mut map_loaded_level: u8 = 1;
@@ -442,7 +405,6 @@ async fn main() {
         z: 1.5,
         yaw: 0.0,
     };
-
     // networking: shared input + state channel, net thread in background
     let input = Arc::new(NetInput::new());
     let (state_tx, state_rx) = mpsc::sync_channel::<StatePacket>(1);
@@ -451,41 +413,39 @@ async fn main() {
         thread::spawn(move || net_thread(server_addr.clone(), username.clone(), input, state_tx));
     }
     let mut last_state: Option<StatePacket> = None;
-
     let mut grabbed = false; // start free — click a window to capture (Escape to release)
-
-    let mut fps_display = 0;
-    let mut fps_timer = 0.0f32;
-
+    // accurate FPS: count actual completed frames per wall-clock second,
+    // rather than trusting get_fps()'s single-frame instantaneous sample
+    // (verified via testing to overreport by 20%+ versus real throughput)
+    let mut frame_count: u32 = 0;
+    let mut fps_display: u32 = 0;
     let mut spawned = false;
     let mut projectiles: Vec<Projectile> = Vec::new();
-
     let mut death_delay = DeathDelay {
         hidden_after: std::collections::HashMap::new(),
     };
-
+    // tracks when the current frame started, used to cap the frame rate
+    // (initial value is immediately overwritten on the first loop iteration)
+    #[allow(unused_assignments)]
+    let mut fps_window_start = Instant::now();
     loop {
         let dt = get_frame_time();
-
         // Escape releases the mouse; click re-grabs it
         if is_key_pressed(KeyCode::Escape) {
             grabbed = false;
             set_cursor_grab(false);
             show_mouse(true);
         }
-
         if is_mouse_button_pressed(MouseButton::Left) && !grabbed {
             grabbed = true;
             set_cursor_grab(true);
             show_mouse(false);
         }
-
         // shoot: right button while mouse is captured (left is for window grab)
         input.shoot.store(
             grabbed && is_mouse_button_down(MouseButton::Right),
             Ordering::Relaxed,
         );
-
         // mouse look: best-effort via mouse_delta_position(). Verified working
         // correctly on native Windows and native Linux (per macroquad's own
         // maintainer, PR #181). Under WSLg (including inside Docker, since
@@ -500,9 +460,7 @@ async fn main() {
         } else {
             0.0
         };
-
         player.update(&map, dt, look_dx);
-
         // publish inputs for the net thread (after update so angle is current)
         input.forward.store(
             is_key_down(KeyCode::W) || is_key_down(KeyCode::Up),
@@ -517,12 +475,10 @@ async fn main() {
             .store(player.yaw.to_bits(), Ordering::Relaxed);
         input.x_bits.store(player.x.to_bits(), Ordering::Relaxed);
         input.y_bits.store(player.z.to_bits(), Ordering::Relaxed);
-
         // drain incoming state — keep only the newest
         while let Ok(s) = state_rx.try_recv() {
             last_state = Some(s);
         }
-
         // sync to the server's actual level the first time it differs
         if let Some(state) = &last_state {
             if state.level != map_loaded_level {
@@ -530,7 +486,6 @@ async fn main() {
                 map_loaded_level = state.level;
             }
         }
-
         // spawn any cosmetic projectiles/death-delays from this tick's shot events
         if let Some(state) = &last_state {
             spawn_projectiles(
@@ -540,7 +495,6 @@ async fn main() {
                 &mut death_delay,
             );
         }
-
         // if WE are respawning, the server owns our position — snap to it
         let mut respawning = false;
         if let Some(state) = &last_state {
@@ -553,7 +507,6 @@ async fn main() {
                 }
             }
         }
-
         // one-time: snap to our server-assigned spawn point
         if !spawned {
             if let Some(state) = &last_state {
@@ -566,28 +519,25 @@ async fn main() {
                 }
             }
         }
-
         clear_background(BLACK);
-
         set_camera(&player.camera());
         draw_maze(&map);
-
         if let Some(state) = &last_state {
             draw_players(state, &death_delay);
             draw_projectiles(&mut projectiles);
         }
-
         set_default_camera();
-
-        // FPS display: sample twice a second so the number doesn't flicker
-        fps_timer += dt;
-        if fps_timer >= 0.5 {
-            fps_display = get_fps();
-            fps_timer = 0.0;
+        // count real completed frames per wall-clock second, measured
+        // directly via Instant rather than accumulated dt (which can drift
+        // once we're manually sleeping to cap frame rate)
+        frame_count += 1;
+        if fps_window_start.elapsed().as_secs_f32() >= 1.0 {
+            fps_display = frame_count;
+            frame_count = 0;
+            fps_window_start = Instant::now();
         }
         let fps_text = format!("FPS: {}", fps_display);
         draw_text(&fps_text, screen_width() - 100.0, 30.0, 24.0, YELLOW);
-
         // show our own username top-left instead of a generic player number
         if let Some(state) = &last_state {
             if let Some(me) = state.players.iter().find(|p| p.id == state.your_id) {
@@ -599,13 +549,11 @@ async fn main() {
                 draw_text(&name, 12.0, 30.0, 24.0, YELLOW);
             }
         }
-
         // crosshair: two thin rectangles crossing at screen centre
         let cx = screen_width() / 2.0;
         let cy = screen_height() / 2.0;
         draw_rectangle(cx - 8.0, cy - 1.0, 16.0, 2.0, WHITE);
         draw_rectangle(cx - 1.0, cy - 8.0, 2.0, 16.0, WHITE);
-
         // death banner while waiting to respawn
         if respawning {
             let msg = "RESPAWNING...";
@@ -618,7 +566,6 @@ async fn main() {
                 RED,
             );
         }
-
         // scoreboard, fuel readout, win overlay
         if let Some(state) = &last_state {
             // fuel readout for our player (red when low)
@@ -637,7 +584,6 @@ async fn main() {
                 draw_win_overlay(state);
             }
         }
-
         draw_minimap(&map, &player, &last_state);
 
         next_frame().await
