@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use shared::map::get_level;
 use shared::protocol::StatePacket;
@@ -88,6 +88,18 @@ async fn main() {
             grabbed = false;
             set_cursor_grab(false);
             show_mouse(true);
+        }
+
+        // Q is the dedicated quit key, on top of Escape and the window's
+        // own close button. Pressing it tells the network thread to send
+        // one final goodbye packet (see net.rs), then this process exits
+        // cleanly. A short pause afterward gives that background thread
+        // an actual chance to send the packet before the whole program
+        // shuts down.
+        if is_key_pressed(KeyCode::Q) {
+            input.quitting.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(50));
+            std::process::exit(0);
         }
 
         if is_mouse_button_pressed(MouseButton::Left) && !grabbed {

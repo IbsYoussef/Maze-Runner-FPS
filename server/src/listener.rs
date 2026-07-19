@@ -60,6 +60,19 @@ pub async fn udp_listener(
             next_id += 1;
         }
 
+        // A client sends disconnecting: true on the single final packet
+        // right before it quits cleanly, using its dedicated quit key.
+        // We remove the player immediately here rather than waiting for
+        // the usual five second timeout, which still exists on its own
+        // in the game tick to catch a client that crashes instead of
+        // quitting cleanly.
+        if packet.disconnecting {
+            if let Some(player) = players.remove(&src) {
+                tracing::info!("player {} ({}) disconnected cleanly", player.id, src);
+            }
+            continue;
+        }
+
         let player = players.get_mut(&src).unwrap();
 
         // the client sends its username once, on its very first packet

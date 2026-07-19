@@ -30,6 +30,11 @@ pub struct NetInput {
     pub x_bits: AtomicU32,
     pub y_bits: AtomicU32,
     pub spawned: AtomicBool,
+    /// set to true by the main loop when the player presses the quit
+    /// key, tells net_thread to send one final goodbye packet and then
+    /// stop running, instead of waiting for the server to notice the
+    /// player is gone through the usual timeout
+    pub quitting: AtomicBool,
 }
 
 impl NetInput {
@@ -42,6 +47,7 @@ impl NetInput {
             x_bits: AtomicU32::new(0f32.to_bits()),
             y_bits: AtomicU32::new(0f32.to_bits()),
             spawned: AtomicBool::new(false),
+            quitting: AtomicBool::new(false),
         }
     }
 }
@@ -49,6 +55,11 @@ impl NetInput {
 // Runs forever on a background thread. Every 1/60th of a second it sends
 // the player's current input to the server, then reads back whatever
 // state packets have arrived and forwards the newest one to the main loop.
+//
+// The loop ends early, on purpose, the moment `quitting` is set to true.
+// The very last packet sent before exiting has `disconnecting: true`, so
+// the server can remove this player immediately, instead of waiting out
+// its normal five second timeout for a client that has gone silent.
 pub fn net_thread(
     server_addr: String,
     username: String,
@@ -79,6 +90,8 @@ pub fn net_thread(
         let t0 = Instant::now();
         seq += 1;
 
+        let quitting = input.quitting.load(Ordering::Relaxed);
+
         let pkt = InputPacket {
             sequence: seq,
             player_id: 0,
@@ -107,11 +120,17 @@ pub fn net_thread(
             } else {
                 username.clone()
             },
+            disconnecting: quitting,
         };
 
         if let Ok(enc) = postcard::to_allocvec(&pkt) {
             let _ = socket.send(&enc);
             username_sent = true;
+        }
+
+        // this was the goodbye packet, our work here is done
+        if quitting {
+            break;
         }
 
         // Drain every packet currently waiting in the socket. We only need

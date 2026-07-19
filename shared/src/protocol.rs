@@ -71,6 +71,12 @@ pub struct InputPacket {
     /// leaves this as an empty string, since the server only needs to
     /// learn it once
     pub username: String,
+    /// true only on the single final packet a client sends right before
+    /// it quits cleanly, using the dedicated quit key. the server uses
+    /// this to remove the player immediately instead of waiting for the
+    /// usual timeout, which still exists separately to catch a client
+    /// that crashes or loses its connection without ever sending this
+    pub disconnecting: bool,
 }
 
 /// Sent from the server to every client, roughly 60 times a second.
