@@ -151,11 +151,17 @@ async fn main() {
             }
         }
 
-        // mouse look is disabled entirely for now while working on WSL,
-        // where it is unreliable, arrow keys are the only way to turn
-        // until this is revisited on native Windows or native Linux
-        let look_dx = 0.0;
-        let _ = raw; // keep the variable so re-enabling this later is a one-line change
+        // mouse look via mouse_delta_position(), confirmed working
+        // correctly on native Windows and native Linux. Disabled
+        // entirely while respawning, since the server owns our facing
+        // direction during that window, and a mouse spike arriving at
+        // the same moment could otherwise fight that value and cause a
+        // visible flicker.
+        let look_dx = if !respawning && grabbed && raw.x.abs() < 150.0 {
+            raw.x
+        } else {
+            0.0
+        };
 
         player.update(&map, dt, look_dx);
 
