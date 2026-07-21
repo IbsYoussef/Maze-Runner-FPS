@@ -1,28 +1,19 @@
 # Maze Runner FPS: Docker Compose
-# Server: headless, exposes UDP 34254
-# Client: X11 forwarded into host display for native mouse/input support
-
+#
+# Runs the headless game server. Exposes UDP port 34254 by default.
+#
+# To choose a level (1, 2, or 3) or a different port, override the
+# command directly, and include --service-ports so the port mapping
+# below still applies:
+#
+#   docker compose run --rm --service-ports server --level 2
+#
 services:
   server:
     build:
       context: .
       dockerfile: docker/Dockerfile.server
     ports:
-    - "34254:34254/udp"
+      - "34254:34254/udp"
     stdin_open: true
     tty: true
-  
-  client:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.client
-    environment:
-      - DISPLAY=${DISPLAY}
-    volumes:
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ${HOME}/.Xauthority:/root/.Xauthority:ro
-    network_mode: host
-    stdin_open: true
-    tty: true
-    depends_on:
-      - server
