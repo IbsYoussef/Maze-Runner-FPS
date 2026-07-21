@@ -1,6 +1,10 @@
-# Maze Runner FPS
+<h1 align="center">🌀 Maze Runner FPS</h1>
 
 A multiplayer first person maze shooter built in Rust, in the spirit of the classic Maze Wars, played over a client-server architecture using UDP.
+
+<p align="center">
+  <img src="assets/image.png" alt="Maze Runner FPS gameplay screenshot" width="700">
+</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust">
@@ -111,15 +115,15 @@ cargo run -p client --release
 
 <div align="center">
 
-| Key | Action |
-|:---:|:---:|
-| `W` `A` `S` `D` | Move forward, left, back, right |
-| Mouse | Look around |
-| `←` `→` | Turn left / right (fallback, see Known Limitations) |
-| Left click | Capture the mouse |
-| Right click | Shoot |
-| `Escape` | Release the mouse |
-| `Q` | Quit cleanly |
+|       Key       |                       Action                        |
+| :-------------: | :-------------------------------------------------: |
+| `W` `A` `S` `D` |           Move forward, left, back, right           |
+|      Mouse      |                     Look around                     |
+|     `←` `→`     | Turn left / right (fallback, see Known Limitations) |
+|   Left click    |                  Capture the mouse                  |
+|   Right click   |                        Shoot                        |
+|    `Escape`     |                  Release the mouse                  |
+|       `Q`       |                    Quit cleanly                     |
 
 </div>
 
